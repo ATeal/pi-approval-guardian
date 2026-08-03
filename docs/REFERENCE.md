@@ -6,6 +6,14 @@ This document defines the runtime behavior and configuration contract for `pi-ap
 
 Approval Guardian provides a low-friction baseline that validates and reviews higher-risk agent actions before execution. Its purpose is to stop an agent from freely issuing unchecked shell actions, private-data reads, and sensitive mutations while leaving ordinary project work practical. It is intentionally not a comprehensive policy engine, filesystem snapshot, DLP system, or OS sandbox. New deterministic restrictions should address a concrete bypass or recurring false-negative pattern and should not broadly serialize, block, or add user turns to normal workflows without proportional benefit.
 
+## Upstream policy provenance
+
+The adapted Guardian source is pinned to OpenAI Codex stable `rust-v0.146.0` commit `e363b08c9175ac1cbe5893615dd2cb9ddf95043b`. This boundary includes the effective `codex-auto-review` policy/template added to the model catalog by Codex PR #34687, not only the bundled files under `codex-rs/core/src/guardian`.
+
+The local policy selectively incorporates direct-user authorization provenance, decision-relevant investigation, reviewer/action environment separation, payload-and-destination egress checks, destructive target expansion, and bounded rejection details. It does not dynamically load model-catalog policy. The stricter local private-data contract remains controlling: exact private sources require explicit direct-user authorization, deterministic `high` authorization, and no reviewer investigation of the pending private target.
+
+Research notes and primary-source links are recorded in [`docs/UPSTREAM-GUARDIAN-RESEARCH.md`](UPSTREAM-GUARDIAN-RESEARCH.md).
+
 ## Interception matrix
 
 | Rule | Default | Behavior |
@@ -202,11 +210,15 @@ Normal reviews provide only:
 read · grep · find · ls
 ```
 
-Private-data reviews provide no investigation tools. Authorization must be decided from the existing user transcript and planned-action metadata.
+Private-data reviews provide no investigation tools. Authorization must be decided from captured direct-user transcript entries; planned-action metadata only identifies the exact private source and scope.
 
 The reviewer never receives `bash`, `write`, or `edit`, and it loads no extensions, skills, prompt templates, themes, or project context files. Its normal investigation tools are reviewer-only wrappers that deterministically reject paths, selectors, and effective scopes classified as private before delegating to Pi's built-in read-only implementations. This containment uses the same heuristic path rules as the main gate and retains their documented limits.
 
-Transcript, tool output, file content, retry reasons, and planned actions are framed as untrusted evidence rather than instructions.
+Only input that Pi reports to Guardian as `interactive` or `rpc` establishes direct-user authorization. Guardian observes the `input` event before skill/template expansion, correlates it with the emitted user message, and stores a versioned provenance marker as a custom session entry that does not enter model context. When a skill, prompt template, or a later-loaded input transformer changes the captured text, the reviewer receives the captured invocation as `direct user` and the changed body separately as `untrusted user content`.
+
+Assistant text, tool output, file content, summaries, retry reasons, planned actions, extension-injected user-role messages, and user-role messages without a valid provenance marker remain untrusted evidence and cannot independently expand authorization. This includes messages from sessions created before provenance capture was available; after upgrading or resuming such a session, repeat an exact private-source authorization in a new direct message. A direct user may delegate relevant implementation scope to a named file or ticket, but that source remains untrusted and cannot itself authorize private-data access, external egress, or unrelated risky side effects. Delegated content never satisfies the exact-private-source requirement.
+
+Reviewer read-only restrictions apply only to the reviewer and do not imply that an allowed Pi action is read-only or sandboxed. Investigation tools are used only when a missing local fact could materially change allow/deny.
 
 ## Authorization contract
 
@@ -229,12 +241,18 @@ Authorized private-read output is not redacted.
 | --- | ---: |
 | Message transcript | 40,000 characters |
 | Tool transcript | 40,000 characters |
-| Single message | 8,000 characters |
-| Single tool entry | 4,000 characters |
-| Planned action | 64,000 characters |
+| Single message content before encoded-line fitting | 8,000 characters |
+| Single tool-entry content before encoded-line fitting | 4,000 characters |
+| Final serialized planned-action envelope | 64,000 characters |
+| Final serialized retry context | 4,000 characters |
+| Blocked-result reviewer/provider detail | 4,000 characters |
 | Recent non-user entries | 40 |
 
-Selection prioritizes the first and latest user intent, other user messages that fit, and recent assistant/tool evidence. Long entries use marked middle truncation.
+The reviewer transcript uses JSON Lines with controlled top-level `index`, `provenance`, `role`, and `content` fields. Only top-level `provenance: "direct_user"` carries authority. Evidence text stays inside a JSON-escaped `content` string, including line and Unicode paragraph separators, so untrusted text cannot create a forged transcript entry or provenance label. Encoded lines are fitted after escaping; message entries can consume at most half of the message budget, the latest direct-user entry is reserved before the first, and JSONL separators plus the omission notice count toward the limit. This keeps a control-heavy early message from hiding a later scope correction or revocation.
+
+The planned action is compact, separator-escaped JSON. The 64,000-character limit applies to that final serialized envelope rather than the pre-escaped payload; oversized payloads are middle-truncated inside an explicit `truncated` marker object.
+
+Selection reserves the latest and first captured direct-user intent, in that safety order, then other direct-user messages that fit and recent untrusted/assistant/tool evidence. Long entries use marked middle truncation. Retry context is JSON-escaped and fitted to its final 4,000-character envelope. Reviewer rationale and provider-failure detail are whitespace-normalized and end-truncated before being returned to the main agent; fixed fail-closed and no-workaround guidance remains outside that bounded detail.
 
 ## Session reuse
 
@@ -300,6 +318,7 @@ When the circuit opens, the current run is aborted and later covered actions are
 - Shell commands are not parsed as a complete shell AST.
 - Arbitrary pathless or nested-path custom tools and unrelated MCP/network/browser/email/deployment/subagent actions are not automatically covered; they need dedicated enforcement.
 - Guardian locks approved `event.input` against later `tool_call` handlers, but cannot observe command prefixes, spawn hooks, or a custom tool's internal behavior after dispatch.
+- Pi chains `input` transforms without exposing immutable original text or the prior transform chain. An extension loaded before Guardian can therefore change the text Pi still reports as `interactive`/`rpc`; this is inside the trusted-extension control-plane boundary because installed extensions already run with full system permissions. Messages reported as `source: "extension"` and changes made after Guardian remain untrusted. Revisit this boundary if Pi exposes immutable original-input provenance.
 - Filesystem state may change between classification and execution; the parallel sibling case is an explicitly accepted risk documented under broad search handling.
 - Reviewer decisions are probabilistic.
 - A user-enabled temporary bypass intentionally removes Guardian classification, review, input locking, and circuit enforcement until it is re-enabled or automatically reset.
