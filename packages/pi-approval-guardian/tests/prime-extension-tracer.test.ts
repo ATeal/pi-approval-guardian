@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import primeApprovalGuardian, {
@@ -8,6 +10,7 @@ import primeApprovalGuardian, {
 	type PrimeExtensionApi,
 	type PrimeToolCallHandler,
 	type PrimeTracerReview,
+	type PrimeTracerReviewResult,
 } from "../../prime-approval-guardian/extensions/index.ts";
 
 function loadPrimeToolCallHandler(review: PrimeTracerReview): PrimeToolCallHandler {
@@ -41,9 +44,19 @@ test("allows a benign IPython cell after the deterministic reviewer allows it", 
 	);
 
 	assert.equal(result, undefined);
-	assert.deepEqual(requests, [
-		{ tool: "ipython", toolCallId: "cell-1", code: "1 + 1" },
-	]);
+	assert.equal(requests.length, 1);
+	assert.deepEqual(requests[0], {
+		host: "prime",
+		tool: "ipython",
+		operation: "execute-cell",
+		payload: { code: "1 + 1" },
+		cwd: realpathSync(process.cwd()),
+		reviewReasons: ["all Prime IPython cells require whole-cell review"],
+		privacy: { privateDataRead: false },
+		payloadState: { complete: true, originalChars: 5, retainedChars: 5 },
+		inputIdentity: requests[0] && (requests[0] as { inputIdentity: string }).inputIdentity,
+	});
+	assert.match((requests[0] as { inputIdentity: string }).inputIdentity, /^sha256:[a-f0-9]{64}$/);
 });
 
 
@@ -144,6 +157,14 @@ test("packs an explicit Prime-only compatibility tracer", () => {
 	assert.ok(!manifest.keywords.includes("pi-extension"));
 	assert.match(manifest.description, /Prime Agent/);
 	assert.ok(files.includes("extensions/index.ts"));
+	assert.ok(files.includes("src/normalized-decision.ts"));
+	assert.ok(files.includes("src/shared-decision.ts"));
+	assert.ok(files.includes("src/reviewer.ts"));
+	assert.equal(
+		readFileSync(new URL("src/shared-decision.ts", packageDirectory), "utf8"),
+		readFileSync(new URL("../src/shared-decision.ts", import.meta.url), "utf8"),
+		"the packed Prime copy must exactly match the shared Guardian decision source",
+	);
 	assert.ok(files.includes("README.md"));
 	assert.ok(files.includes("LICENSES/Apache-2.0.txt"));
 });
@@ -218,7 +239,7 @@ test("the packaged default extension blocks IPython without a reviewer", async (
 		{},
 	);
 	assert.equal(result?.block, true);
-	assert.match(result?.reason ?? "", /no configured reviewer/i);
+	assert.match(result?.reason ?? "", /model registry is unavailable/i);
 });
 
 
@@ -287,4 +308,157 @@ test("turns a hung reviewer into a blocking timeout", async () => {
 	assert.equal(result?.block, true);
 	assert.match(result?.reason ?? "", /timeout/i);
 	assert.ok(Date.now() - started < 1_000, "preflight must not hang indefinitely");
+});
+
+
+test("the real reviewer uses the current registered model in an isolated tool-free context", async () => {
+	const model = { provider: "native-review", id: "safe", api: "fake" };
+	const streamCalls: unknown[] = [];
+	const handler = (() => {
+		const handlers = new Map<string, PrimeToolCallHandler>();
+		createPrimeApprovalGuardian({
+			streamModel: async (selected, context, auth, signal) => {
+				streamCalls.push({ selected, context, auth, signal: signal instanceof AbortSignal });
+				return JSON.stringify({
+					risk_level: "low",
+					user_authorization: "unknown",
+					outcome: "allow",
+					rationale: "Pure calculation.",
+				});
+			},
+		})({ on: (name, fn) => handlers.set(name, fn as PrimeToolCallHandler) } as PrimeExtensionApi);
+		return handlers.get("tool_call")!;
+	})();
+	const context = {
+		cwd: process.cwd(),
+		model,
+		modelRegistry: {
+			find: () => undefined,
+			getApiKeyAndHeaders: async () => ({ ok: true, headers: { authorization: "opaque" } }),
+		},
+		signal: undefined,
+	};
+	const event = { toolName: "ipython", toolCallId: "real", input: { code: "2 + 2" } };
+	assert.equal(await handler(event, context), undefined);
+	assert.equal(Object.isFrozen(event.input), true);
+	assert.deepEqual(streamCalls, [{
+		selected: model,
+		context: {
+			systemPrompt: (streamCalls[0] as any).context.systemPrompt,
+			messages: [{ role: "user", content: [{ type: "text", text: (streamCalls[0] as any).context.messages[0].content[0].text }], timestamp: (streamCalls[0] as any).context.messages[0].timestamp }],
+			tools: [],
+		},
+		auth: { ok: true, headers: { authorization: "opaque" } },
+		signal: true,
+	}]);
+	assert.match((streamCalls[0] as any).context.systemPrompt, /never execute/i);
+	assert.match((streamCalls[0] as any).context.messages[0].content[0].text, /"host":"prime"/);
+	assert.doesNotMatch(JSON.stringify((streamCalls[0] as any).context), /codex-auto-review/i);
+});
+
+test("a configured reviewer model is resolved without synthesizing codex-auto-review", async () => {
+	const configured = { provider: "registered", id: "reviewer", api: "fake" };
+	let selected: unknown;
+	const handlers = new Map<string, PrimeToolCallHandler>();
+	createPrimeApprovalGuardian({
+		reviewerModel: "registered/reviewer",
+		streamModel: async (model) => {
+			selected = model;
+			return '{"risk_level":"low","user_authorization":"unknown","outcome":"allow","rationale":"safe"}';
+		},
+	})({ on: (name, fn) => handlers.set(name, fn as PrimeToolCallHandler) } as PrimeExtensionApi);
+	const result = await handlers.get("tool_call")!(
+		{ toolName: "ipython", toolCallId: "registered", input: { code: "3 + 3" } },
+		{
+			cwd: process.cwd(),
+			model: { provider: "main", id: "current", api: "fake" },
+			modelRegistry: {
+				find: (provider: string, id: string) => provider === "registered" && id === "reviewer" ? configured : undefined,
+				getApiKeyAndHeaders: async () => ({ ok: true }),
+			},
+		},
+	);
+	assert.equal(result, undefined);
+	assert.equal(selected, configured);
+});
+
+test("default real review blocks auth, provider, invalid assessment, deny and timeout without side effects", async (t) => {
+	for (const scenario of ["auth", "provider", "invalid", "type-confusion", "deny", "timeout"] as const) {
+		await t.test(scenario, async () => {
+			let sideEffect = false;
+			const handlers = new Map<string, PrimeToolCallHandler>();
+			createPrimeApprovalGuardian({
+				timeoutMs: 10,
+				streamModel: async () => {
+					if (scenario === "provider") throw new Error("provider unavailable");
+					if (scenario === "timeout") return new Promise<string>(() => undefined);
+					if (scenario === "invalid") return "not json";
+					if (scenario === "type-confusion") {
+						return JSON.stringify({
+							risk_level: ["critical"],
+							user_authorization: "unknown",
+							outcome: "allow",
+							rationale: "must not bypass strict parsing",
+						});
+					}
+					return JSON.stringify({ risk_level: "high", user_authorization: "unknown", outcome: "deny", rationale: "denied" });
+				},
+			})({ on: (name, fn) => handlers.set(name, fn as PrimeToolCallHandler) } as PrimeExtensionApi);
+			const result = await handlers.get("tool_call")!(
+				{ toolName: "ipython", toolCallId: scenario, input: { code: "side_effect()" } },
+				{
+					cwd: process.cwd(),
+					model: { provider: "native", id: "current", api: "fake" },
+					modelRegistry: { getApiKeyAndHeaders: async () => scenario === "auth" ? ({ ok: false, error: "missing" }) : ({ ok: true }) },
+				},
+			);
+			if (!result?.block) sideEffect = true;
+			assert.equal(result?.block, true);
+			assert.equal(sideEffect, false);
+		});
+	}
+});
+
+test("fails closed for incomplete and untrusted whole-cell inputs", async (t) => {
+	for (const [name, input] of [
+		["incomplete", { code: "x".repeat(64_001) }],
+		["untrusted", Object.assign(Object.create({ inherited: true }), { code: "1 + 1" })],
+	] as const) {
+		await t.test(name, async () => {
+			let reviewed = false;
+			const handler = loadPrimeToolCallHandler(() => { reviewed = true; return { outcome: "allow" }; });
+			const result = await handler({ toolName: "ipython", toolCallId: name, input }, { cwd: process.cwd() });
+			assert.equal(result?.block, true);
+			assert.equal(reviewed, false);
+		});
+	}
+});
+
+
+test("external cancellation blocks immediately and aborts a late reviewer", async () => {
+	const handlers = new Map<string, PrimeToolCallHandler>();
+	const controller = new AbortController();
+	let reviewerSignal: AbortSignal | undefined;
+	let settleReview: ((value: PrimeTracerReviewResult) => void) | undefined;
+	createPrimeApprovalGuardian({
+		timeoutMs: 60_000,
+		review: (_action, signal) => {
+			reviewerSignal = signal;
+			return new Promise((resolve) => {
+				settleReview = resolve;
+			});
+		},
+	})({ on: (name, fn) => handlers.set(name, fn as PrimeToolCallHandler) } as PrimeExtensionApi);
+	const pending = handlers.get("tool_call")!(
+		{ toolName: "ipython", toolCallId: "cancelled", input: { code: "side_effect()" } },
+		{ cwd: process.cwd(), signal: controller.signal },
+	);
+	controller.abort();
+	const result = await pending;
+	assert.equal(result?.block, true);
+	assert.match(result?.reason ?? "", /cancelled/i);
+	assert.equal(reviewerSignal?.aborted, true);
+	settleReview?.({ outcome: "allow" });
+	await Promise.resolve();
+	assert.equal(result?.block, true, "late reviewer settlement cannot change the decision");
 });

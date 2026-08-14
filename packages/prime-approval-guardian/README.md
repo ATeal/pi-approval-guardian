@@ -1,24 +1,23 @@
-# prime-approval-guardian tracer
+# prime-approval-guardian
 
-This private alpha tracer validates fail-closed Approval Guardian integration with
-Prime Agent 0.7.x. It is not the published Prime port and is not a Pi extension.
+This private alpha package provides a fail-closed whole-cell Approval Guardian for Prime Agent 0.7.x. It is not a Pi extension and is not published yet.
 
-The default extension intercepts the Prime Agent `ipython` tool and blocks every
-cell because no production reviewer is configured yet. Tests inject a deterministic
-review decision to verify both allow and block preflight behavior.
+The extension intercepts every Prime Agent `ipython` call, normalizes the exact complete cell, and reviews it before execution. It uses an explicitly registered reviewer model when supplied by the host adapter, otherwise it falls back to Prime’s current registered model. Authentication failure, provider failure, timeout, malformed input, incomplete input, and invalid or denying assessments all block the cell.
 
 ## Compatibility
 
 - Prime Agent: `>=0.7.2 <0.8.0`
 - Node.js: `>=22.8.0`
 
+## Reviewer isolation
+
+The reviewer receives only a new context containing the Guardian system prompt and the normalized whole-cell action. It receives no main-conversation messages and no tools, extensions, skills, project context, IPython, shell, or write capability. Reviewer output must be one strict assessment object.
+
 ## Security scope
 
-This tracer covers only builtin Prime Agent IPython preflight. It does not claim
-Pi shell/path-tool coverage, reviewer-model integration, private-data policy, a
-sandbox, bypass controls, or grants. Those are delivered by later tickets in #10.
+This alpha covers Prime Agent’s built-in IPython preflight only. It is an approval gate, not an OS sandbox. It does not provide Pi shell/path-tool coverage, Prime configuration files, capability indicators, bypass controls, or grants; those belong to later tickets in #10.
 
-## Native tracer verification
+## Native verification
 
 From the repository root, with Prime Agent 0.7.x installed:
 
@@ -26,14 +25,4 @@ From the repository root, with Prime Agent 0.7.x installed:
 npm run test:prime-native
 ```
 
-Prime Agent 0.7.x accepts local package directories rather than npm tarball
-paths. The smoke test therefore packs the artifact, expands it into an isolated
-temporary install, and passes only that installed directory to
-`prime-agent package install`. The deterministic provider and working directory
-are also copied into the temporary area, so the loaded extension and its runtime
-do not resolve from the repository checkout.
-
-It verifies print-mode allow, deny, failure, real deadline timeout, and invalid
-review paths, plus RPC blocking and a daemon-backed blocking path. Every blocked
-path asserts that the IPython cell did not create its marker file. Versions
-outside `>=0.7.2 <0.8.0` fail explicitly.
+The smoke test packs and installs the artifact into isolated temporary package storage, then exercises Prime’s actual tool-call seam. It verifies injected and nested real-reviewer allow, deny, unavailable authentication, provider failure, timeout, and invalid-assessment paths, plus RPC and daemon-backed blocking. Allowed cells must create the exact expected marker; every blocked path must leave no side effect. Versions outside `>=0.7.2 <0.8.0` fail explicitly.

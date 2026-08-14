@@ -35,6 +35,27 @@ function streamSimple(model: any, context: any) {
 	queueMicrotask(() => {
 		const message: any = assistantMessage(model);
 		stream.push({ type: "start", partial: message });
+		if (Array.isArray(context.tools) && context.tools.length === 0) {
+			const outcome = process.env.PRIME_GUARDIAN_REVIEW_OUTCOME ?? "deny";
+			if (outcome === "timeout") return;
+			if (outcome === "failure") {
+				message.stopReason = "error";
+				message.errorMessage = "nested reviewer provider failure";
+				stream.push({ type: "error", reason: "error", error: message });
+				stream.end();
+				return;
+			}
+			const text = outcome === "invalid"
+				? "invalid nested assessment"
+				: JSON.stringify({ risk_level: outcome === "allow" ? "low" : "high", user_authorization: "unknown", outcome, rationale: `nested reviewer ${outcome}` });
+			message.content.push({ type: "text", text });
+			stream.push({ type: "text_start", contentIndex: 0, partial: message });
+			stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+			stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
+			stream.push({ type: "done", reason: "stop", message });
+			stream.end();
+			return;
+		}
 		const toolResult = [...context.messages]
 			.reverse()
 			.find(
@@ -100,9 +121,9 @@ function streamSimple(model: any, context: any) {
 
 export default function fakePrimeSmokeProvider(pi: ExtensionAPI): void {
 	pi.registerProvider("native-smoke", {
-		baseUrl: "http://127.0.0.1.invalid",
+		baseUrl: process.env.PRIME_GUARDIAN_FAKE_REVIEW_URL ?? "http://127.0.0.1.invalid",
 		apiKey: "unused",
-		api: "native-smoke-api" as any,
+		api: "openai-completions",
 		streamSimple,
 		models: [
 			{

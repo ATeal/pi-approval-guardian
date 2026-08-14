@@ -308,4 +308,20 @@ test("computes deterministic identities only for complete JSON-like input", () =
 			),
 		/invalid input property/,
 	);
+	let getterCalls = 0;
+	const accessorArray: unknown[] = [];
+	accessorArray.length = 1;
+	Object.defineProperty(accessorArray, "0", {
+		enumerable: true,
+		get: () => {
+			getterCalls++;
+			return "value";
+		},
+	});
+	assert.throws(() => guardianInputIdentity(accessorArray), /invalid input array entry/);
+	assert.equal(getterCalls, 0, "input identity must never invoke an array accessor");
+	const sparseArray: unknown[] & { extra?: string } = [];
+	sparseArray.length = 1;
+	sparseArray.extra = "not-an-index";
+	assert.throws(() => guardianInputIdentity(sparseArray), /invalid input array entry/);
 });

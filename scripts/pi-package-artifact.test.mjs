@@ -45,6 +45,7 @@ test("the public Pi artifact contains exactly its publication allowlist", () => 
     "src/reviewer-channels.ts",
     "src/reviewer-session.ts",
     "src/reviewer-tools.ts",
+    "src/shared-decision.ts",
     "src/shell-private-data.ts",
     "src/tool-actions.ts",
     "src/tool-input-lock.ts",

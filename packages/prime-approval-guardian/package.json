@@ -2,7 +2,7 @@
   "name": "prime-approval-guardian",
   "version": "0.1.0-alpha.0",
   "private": true,
-  "description": "A fail-closed Prime Agent IPython preflight tracer for validating Approval Guardian host integration.",
+  "description": "A fail-closed Prime Agent whole-cell IPython approval gate with an isolated real reviewer.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -26,6 +26,7 @@
   },
   "files": [
     "extensions",
+    "src",
     "README.md",
     "LICENSE",
     "NOTICE",
@@ -35,5 +36,8 @@
     "extensions": [
       "./extensions/index.ts"
     ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": ">=0.80.7 <0.81.0"
   }
 }

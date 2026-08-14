@@ -29,6 +29,8 @@ const agentDirectory = join(temporary, "agent");
 const installPrefix = join(temporary, "install");
 const daemonSocket = join(temporary, "daemon.sock");
 let daemon;
+let reviewServer;
+let fakeReviewerBaseUrl;
 
 mkdirSync(workingDirectory);
 copyFileSync(fakeProviderFixture, fakeProvider);
@@ -36,7 +38,7 @@ copyFileSync(fakeProviderFixture, fakeProvider);
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, {
 		encoding: "utf8",
-		env: smokeEnvironment(options.marker),
+		env: smokeEnvironment(options.marker, options.reviewerOutcome),
 		...options,
 	});
 	if (result.status !== 0) {
@@ -47,14 +49,18 @@ function run(command, args, options = {}) {
 	return result;
 }
 
-function smokeEnvironment(marker) {
+function smokeEnvironment(marker, reviewerOutcome) {
 	const environment = {
 		...process.env,
 		PI_CODING_AGENT_DIR: agentDirectory,
 		PI_OFFLINE: "1",
 		PI_SKIP_VERSION_CHECK: "1",
+		ANTHROPIC_API_KEY: "",
+		ANTHROPIC_OAUTH_TOKEN: "",
+		...(fakeReviewerBaseUrl ? { PRIME_GUARDIAN_FAKE_REVIEW_URL: fakeReviewerBaseUrl } : {}),
 	};
 	if (marker) environment.PRIME_GUARDIAN_SMOKE_MARKER = marker;
+	if (reviewerOutcome) environment.PRIME_GUARDIAN_REVIEW_OUTCOME = reviewerOutcome;
 	const managedPython = join(
 		process.env.HOME ?? "",
 		".prime",
@@ -149,7 +155,7 @@ function expectPrint(expected, marker, options) {
 		{ marker },
 	);
 	if (result.stdout.trim() !== expected) {
-		throw new Error(`Expected ${expected}, received ${JSON.stringify(result.stdout)}`);
+		throw new Error(`Expected ${expected}, received ${JSON.stringify(result.stdout)}; stderr: ${result.stderr}`);
 	}
 	return existsSync(marker);
 }
@@ -176,6 +182,52 @@ function expectRpcBlock(marker) {
 		throw new Error("RPC smoke did not observe the fail-closed result");
 	}
 	if (existsSync(marker)) throw new Error("blocked RPC cell produced a side effect");
+}
+
+async function startFakeReviewServer() {
+	const serverPath = join(temporary, "fake-review-server.mjs");
+	writeFileSync(serverPath, `
+import http from "node:http";
+const server = http.createServer((request, response) => {
+  let body = "";
+  request.setEncoding("utf8");
+  request.on("data", (chunk) => { body += chunk; });
+  request.on("end", () => {
+    const marker = body.match(/real-(allow|deny|failure|timeout|invalid)\\.marker/)?.[1] ?? "deny";
+    if (marker === "timeout") return;
+    if (marker === "failure") { response.writeHead(500); response.end("provider failure"); return; }
+    const assessment = marker === "invalid"
+      ? "invalid nested assessment"
+      : JSON.stringify({ risk_level: marker === "allow" ? "low" : "high", user_authorization: "unknown", outcome: marker, rationale: "nested reviewer " + marker });
+    const chunk = (delta, finish_reason = null) => JSON.stringify({ id: "guardian-review", object: "chat.completion.chunk", created: 0, model: "deterministic", choices: [{ index: 0, delta, finish_reason }] });
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write("data: " + chunk({ role: "assistant", content: assessment }) + "\\n\\n");
+    response.write("data: " + chunk({}, "stop") + "\\n\\n");
+    response.end("data: [DONE]\\n\\n");
+  });
+});
+server.listen(0, "127.0.0.1", () => console.log("http://127.0.0.1:" + server.address().port + "/v1"));
+process.on("SIGTERM", () => server.close(() => process.exit(0)));
+`);
+	reviewServer = spawn(process.execPath, [serverPath], { stdio: ["ignore", "pipe", "pipe"] });
+	fakeReviewerBaseUrl = await new Promise((resolveUrl, rejectUrl) => {
+		let output = "";
+		const timer = setTimeout(() => rejectUrl(new Error("fake reviewer server startup timed out")), 2_000);
+		reviewServer.stdout.on("data", (chunk) => {
+			output += chunk;
+			const newline = output.indexOf("\n");
+			if (newline >= 0) { clearTimeout(timer); resolveUrl(output.slice(0, newline).trim()); }
+		});
+		reviewServer.once("exit", (code) => { clearTimeout(timer); rejectUrl(new Error(`fake reviewer server exited: ${code}`)); });
+	});
+}
+
+async function stopFakeReviewServer() {
+	if (!reviewServer || reviewServer.exitCode !== null) return;
+	const exited = new Promise((resolveExit) => reviewServer.once("exit", resolveExit));
+	reviewServer.kill("SIGTERM");
+	await Promise.race([exited, new Promise((resolveDelay) => setTimeout(resolveDelay, 2_000))]);
+	if (reviewServer.exitCode === null) reviewServer.kill("SIGKILL");
 }
 
 async function startDaemon() {
@@ -231,11 +283,19 @@ try {
 			`Unsupported Prime Agent for tracer smoke: ${versionOutput || "unknown"}`,
 		);
 	}
+	await startFakeReviewServer();
 	const installed = installArtifact(packArtifact());
 	const allowExtension = writeReviewExtension(
 		installed,
 		"allow",
 		'{ review: () => ({ outcome: "allow" }) }',
+	);
+	const realReviewExtension = writeReviewExtension(installed, "real-review", "{ timeoutMs: 2_000 }");
+	const realTimeoutExtension = writeReviewExtension(installed, "real-timeout", "{ timeoutMs: 10 }");
+	const unavailableAuthExtension = writeReviewExtension(
+		installed,
+		"unavailable-auth",
+		'{ reviewerModel: "anthropic/claude-haiku-4-5", timeoutMs: 2_000 }',
 	);
 	const blockedReviews = [
 		[
@@ -270,6 +330,17 @@ try {
 			throw new Error(`${name} review produced a side effect`);
 		}
 	}
+	if (expectPrint("BLOCKED_OK", join(temporary, "real-auth.marker"), { extension: unavailableAuthExtension })) {
+		throw new Error("unavailable reviewer authentication produced a side effect");
+	}
+	for (const outcome of ["deny", "failure", "timeout", "invalid"]) {
+		if (expectPrint("BLOCKED_OK", join(temporary, `real-${outcome}.marker`), { extension: outcome === "timeout" ? realTimeoutExtension : realReviewExtension, reviewerOutcome: outcome })) {
+			throw new Error(`nested real reviewer ${outcome} produced a side effect`);
+		}
+	}
+	if (!expectPrint("ALLOW_OK", join(temporary, "real-allow.marker"), { extension: realReviewExtension, reviewerOutcome: "allow" })) {
+		throw new Error("nested real reviewer allow did not execute the exact cell");
+	}
 	if (!expectPrint("ALLOW_OK", allowedMarker, { extension: allowExtension })) {
 		throw new Error("allowed print cell did not produce its expected side effect");
 	}
@@ -283,9 +354,10 @@ try {
 		throw new Error("blocked daemon-backed print cell produced a side effect");
 	}
 	console.log(
-		"Prime Agent native tracer smoke passed: print allow/deny/failure/timeout/invalid, RPC block, daemon-backed block.",
+		"Prime Agent native tracer smoke passed: injected and nested real reviewer allow/deny/auth/failure/timeout/invalid, RPC block, daemon-backed block.",
 	);
 } finally {
 	await stopDaemon();
+	await stopFakeReviewServer();
 	rmSync(temporary, { recursive: true, force: true });
 }
