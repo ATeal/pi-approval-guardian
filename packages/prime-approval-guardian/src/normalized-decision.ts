@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
+import { isProxy } from "node:util/types";
 import {
 	analyzeIpythonCapabilities,
 	failedIpythonCapabilityAnalysis,
@@ -73,6 +74,7 @@ function isPlainCodeInput(input: unknown): input is { code: string } {
 	if (
 		typeof input !== "object" ||
 		input === null ||
+		isProxy(input) ||
 		Object.getPrototypeOf(input) !== Object.prototype
 	) {
 		return false;

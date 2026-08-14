@@ -671,6 +671,7 @@ test("fails closed for a proxy that can substitute code after review", async () 
 
 	assert.equal(result?.block, true);
 	assert.equal(reviewed, false);
+	assert.equal(reads, 0, "proxy traps must not run during rejection");
 });
 
 test("recomputes this call's exact identity after review without borrowing a concurrent approval", async () => {

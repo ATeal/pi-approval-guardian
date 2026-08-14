@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 
 const packageDirectory = resolve("packages/pi-approval-guardian");
 
@@ -50,4 +51,17 @@ test("the public Pi artifact contains exactly its publication allowlist", () => 
     "src/tool-actions.ts",
     "src/tool-input-lock.ts",
   ]);
+});
+
+
+test("host artifacts share one hard-policy contract and expose no legacy Pi route", () => {
+  const piCore = readFileSync(resolve("packages/pi-approval-guardian/src/shared-decision.ts"), "utf8");
+  const primeCore = readFileSync(resolve("packages/prime-approval-guardian/src/shared-decision.ts"), "utf8");
+  assert.equal(piCore, primeCore);
+  const piEntry = readFileSync(resolve("packages/pi-approval-guardian/extensions/index.ts"), "utf8");
+  for (const removed of ["enforceActionRequirements", "lockAllowedToolInput", "normalizePiBashAction"]) {
+    assert.equal(piEntry.includes(removed), false, removed);
+  }
+  assert.match(piEntry, /normalizePiToolAction/);
+  assert.match(piEntry, /decideGuardianAction/);
 });

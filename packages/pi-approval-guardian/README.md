@@ -14,6 +14,8 @@ It reviews agent shell commands, private-data access, and sensitive file mutatio
 > [!IMPORTANT]
 > Pi extensions run with your user permissions. Review the source before installation. Approval Guardian reduces risk but is not an operating-system sandbox.
 
+The Pi adapter classifies native Pi tool calls, normalizes every covered action, and sends it through the shared fail-closed Guardian decision contract before applying Pi lifecycle and UI behavior.
+
 ## Install
 
 ```bash

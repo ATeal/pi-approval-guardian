@@ -2,7 +2,7 @@
 
 This private alpha package provides a fail-closed whole-cell Approval Guardian for Prime Agent 0.7.x. It is not a Pi extension and is not published yet.
 
-The extension intercepts every Prime Agent `ipython` call, normalizes the exact complete cell, and reviews it before execution. It uses an explicitly registered reviewer model when supplied by the host adapter, otherwise it falls back to Prime’s current registered model. Authentication failure, provider failure, timeout, malformed input, incomplete input, and invalid or denying assessments all block the cell.
+The explicit Prime adapter intercepts every Prime Agent `ipython` call, normalizes the exact complete cell, and sends it through the shared fail-closed Guardian decision contract before execution. It uses an explicitly registered reviewer model when supplied by the host adapter, otherwise it falls back to Prime’s current registered model. Authentication failure, provider failure, timeout, malformed input, incomplete input, and invalid or denying assessments all block the cell.
 
 ## Compatibility
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isProxy } from "node:util/types";
 
 export type GuardianRiskLevel = "low" | "medium" | "high" | "critical";
 export type GuardianUserAuthorization = "unknown" | "low" | "medium" | "high";
@@ -135,7 +136,7 @@ export async function decideGuardianAction(
 	};
 }
 
-export function enforceNormalizedActionRequirements(
+function enforceNormalizedActionRequirements(
 	action: Pick<NormalizedGuardianAction, "payload" | "privacy">,
 	result: GuardianReviewResult,
 ): GuardianReviewResult {
@@ -162,19 +163,80 @@ export function enforceNormalizedActionRequirements(
 }
 
 export function guardianInputIdentity(value: unknown): string {
-	const canonical = canonicalJson(value);
-	let clone: unknown;
-	try {
-		clone = structuredClone(value);
-	} catch {
-		throw new Error("input cannot be safely cloned");
-	}
-	if (canonicalJson(clone) !== canonical) {
-		throw new Error("input changes when safely cloned");
-	}
+	const snapshot = snapshotGuardianJson(value);
+	const canonical = canonicalJson(snapshot);
 	return `sha256:${createHash("sha256")
 		.update(canonical, "utf8")
 		.digest("hex")}`;
+}
+
+/** Create a getter-free JSON snapshot without invoking proxy traps or iterators. */
+export function snapshotGuardianJson<T>(value: T): T {
+	return cloneJson(value, new WeakSet<object>(), new WeakSet<object>()) as T;
+}
+
+function cloneJson(
+	value: unknown,
+	active: WeakSet<object>,
+	seen: WeakSet<object>,
+): unknown {
+	if (value === null || typeof value === "string" || typeof value === "boolean") {
+		return value;
+	}
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error("non-finite input number");
+		return value;
+	}
+	if (typeof value !== "object") throw new Error(`non-JSON input ${typeof value}`);
+	if (isProxy(value)) throw new Error("proxy input is not supported");
+	if (active.has(value)) throw new Error("cyclic input");
+	if (seen.has(value)) throw new Error("repeated input reference");
+	active.add(value);
+	seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			if (Object.getPrototypeOf(value) !== Array.prototype) {
+				throw new Error("input array has a custom prototype");
+			}
+			const keys = Reflect.ownKeys(value).filter((key) => key !== "length");
+			if (keys.length !== value.length) throw new Error("invalid input array shape");
+			const clone: unknown[] = [];
+			for (let index = 0; index < value.length; index++) {
+				const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+				if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+					throw new Error("invalid input array entry");
+				}
+				clone.push(cloneJson(descriptor.value, active, seen));
+			}
+			return clone;
+		}
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw new Error("input is not a plain object");
+		}
+		const keys = Reflect.ownKeys(value);
+		if (keys.some((key) => typeof key === "symbol")) {
+			throw new Error("symbol-keyed input property");
+		}
+		const clone: Record<string, unknown> = prototype === null
+			? Object.create(null) as Record<string, unknown>
+			: {};
+		for (const key of keys as string[]) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+				throw new Error("invalid input property");
+			}
+			Object.defineProperty(clone, key, {
+				value: cloneJson(descriptor.value, active, seen),
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
+		}
+		return clone;
+	} finally {
+		active.delete(value);
+	}
 }
 
 function inputIdentityIsValid(value: string): boolean {
@@ -212,6 +274,7 @@ function canonicalJson(
 		return Object.is(value, -0) ? "-0" : JSON.stringify(value);
 	}
 	if (typeof value !== "object") throw new Error(`non-JSON input ${typeof value}`);
+	if (isProxy(value)) throw new Error("proxy input is not supported");
 	if (active.has(value)) throw new Error("cyclic input");
 	if (seen.has(value)) throw new Error("repeated input reference");
 	active.add(value);

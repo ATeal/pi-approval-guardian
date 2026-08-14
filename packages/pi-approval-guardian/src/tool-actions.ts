@@ -204,7 +204,6 @@ function shouldReviewMutationTarget(
 	return false;
 }
 
-export { enforceActionRequirements } from "./normalized-decision.ts";
 
 const DIRECTORY_SCAN_CACHE_SAFE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 

@@ -5,4 +5,4 @@ This repository publishes host-specific approval gates from one npm workspace:
 - [`pi-approval-guardian`](packages/pi-approval-guardian/README.md) for Pi
 - [`prime-approval-guardian`](packages/prime-approval-guardian/README.md) for Prime Agent (alpha)
 
-The packages share security concepts while keeping host adapters, configuration, grants, and defaults explicit and separate. See each package README for installation and usage.
+Both host adapters normalize their native tool calls into the same hard-policy and decision contract. Pi and Prime classification, lifecycle wiring, configuration, and defaults remain explicit and separate. Neither package currently implements grants. See each package README for installation and usage.
