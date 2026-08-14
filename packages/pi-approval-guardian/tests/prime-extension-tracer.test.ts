@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+
+const PRIME_TEST_AGENT_DIR = join(tmpdir(), "prime-guardian-test-no-config");
 import primeApprovalGuardian, {
 	createPrimeApprovalGuardian,
 	guardianInputIdentity,
@@ -18,7 +20,7 @@ import { sanitizeIpythonCapabilityAnalysis } from "../../prime-approval-guardian
 
 function loadPrimeToolCallHandler(review: PrimeTracerReview): PrimeToolCallHandler {
 	const handlers = new Map<string, PrimeToolCallHandler>();
-	createPrimeApprovalGuardian({ review })(
+	createPrimeApprovalGuardian({ review, agentDir: PRIME_TEST_AGENT_DIR })(
 		{
 			on(name: string, handler: PrimeToolCallHandler) {
 				handlers.set(name, handler);
@@ -415,7 +417,7 @@ test("the packaged default extension blocks IPython without a reviewer", async (
 		{},
 	);
 	assert.equal(result?.block, true);
-	assert.match(result?.reason ?? "", /model registry is unavailable/i);
+	assert.match(result?.reason ?? "", /configuration was unavailable|model registry is unavailable/i);
 });
 
 
@@ -463,6 +465,7 @@ test("fails closed when reviewer result inspection throws", async () => {
 test("turns a hung reviewer into a blocking timeout", async () => {
 	const handlers = new Map<string, PrimeToolCallHandler>();
 	createPrimeApprovalGuardian({
+		agentDir: PRIME_TEST_AGENT_DIR,
 		timeoutMs: 10,
 		review: () => new Promise(() => undefined),
 	})({
@@ -493,6 +496,7 @@ test("the real reviewer uses the current registered model in an isolated tool-fr
 	const handler = (() => {
 		const handlers = new Map<string, PrimeToolCallHandler>();
 		createPrimeApprovalGuardian({
+		agentDir: PRIME_TEST_AGENT_DIR,
 			streamModel: async (selected, context, auth, signal) => {
 				streamCalls.push({ selected, context, auth, signal: signal instanceof AbortSignal });
 				return JSON.stringify({
@@ -537,6 +541,7 @@ test("a configured reviewer model is resolved without synthesizing codex-auto-re
 	let selected: unknown;
 	const handlers = new Map<string, PrimeToolCallHandler>();
 	createPrimeApprovalGuardian({
+		agentDir: PRIME_TEST_AGENT_DIR,
 		reviewerModel: "registered/reviewer",
 		streamModel: async (model) => {
 			selected = model;
@@ -564,6 +569,7 @@ test("default real review blocks auth, provider, invalid assessment, deny and ti
 			let sideEffect = false;
 			const handlers = new Map<string, PrimeToolCallHandler>();
 			createPrimeApprovalGuardian({
+		agentDir: PRIME_TEST_AGENT_DIR,
 				timeoutMs: 10,
 				streamModel: async () => {
 					if (scenario === "provider") throw new Error("provider unavailable");
@@ -617,6 +623,7 @@ test("external cancellation blocks immediately and aborts a late reviewer", asyn
 	let reviewerSignal: AbortSignal | undefined;
 	let settleReview: ((value: PrimeTracerReviewResult) => void) | undefined;
 	createPrimeApprovalGuardian({
+		agentDir: PRIME_TEST_AGENT_DIR,
 		timeoutMs: 60_000,
 		review: (_action, signal) => {
 			reviewerSignal = signal;
@@ -678,7 +685,7 @@ test("recomputes this call's exact identity after review without borrowing a con
 
 	const changedPending = handler(changed, {});
 	const unchangedPending = handler(unchanged, {});
-	await Promise.resolve();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	changed.input.code = "substituted()";
 	releases.get("second()")?.();
 	releases.get("first()")?.();
@@ -698,7 +705,10 @@ test("the Prime handler seam prevents later code mutation, replacement, and reor
 	] as const) {
 		await t.test(name, async () => {
 			const handlers: PrimeToolCallHandler[] = [];
-			createPrimeApprovalGuardian({ review: () => ({ outcome: "allow" }) })({
+			createPrimeApprovalGuardian({
+				review: () => ({ outcome: "allow" }),
+				agentDir: PRIME_TEST_AGENT_DIR,
+			})({
 				on(eventName: string, handler: PrimeToolCallHandler) {
 					if (eventName === "tool_call") handlers.push(handler);
 				},
@@ -742,7 +752,7 @@ test("an adjacent call cannot reuse the preceding call's approved identity", asy
 	assert.equal(await handler(first, {}), undefined);
 	const second = { toolName: "ipython", toolCallId: "second", input: { code: "second()" } };
 	const pending = handler(second, {});
-	await Promise.resolve();
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	second.input.code = "substituted()";
 	releaseSecond?.();
 	const result = await pending;

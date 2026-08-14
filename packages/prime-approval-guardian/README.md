@@ -19,9 +19,19 @@ Before review, a pure bounded lexical pass annotates the normalized action with 
 
 These indicators are advisory evidence only. They do not authorize an action, claim containment, or replace review of the exact complete cell. If annotation fails, the failure uncertainty and unchanged whole cell still go to the reviewer; normal deny/failure/timeout behavior remains fail closed.
 
+## Prime configuration and status
+
+Guardian reads `approval-guardian.json` from Prime Agent’s `getAgentDir()` (normally `~/.prime/agent`) and considers a project candidate only at `<cwd>/.prime/agent/approval-guardian.json`. It never reads Pi configuration locations.
+
+Global configuration may set `reviewerModel` (`provider/model`), `timeoutMs` (1,000–300,000), `policy`, and the fixed `review.ipython.cell` floor. Project configuration is strengthening-only: it may extend the global deadline, but cannot select a reviewer, shorten the deadline, inject policy, create grants, weaken whole-cell review, or request bypass. Such entries are rejected and reported.
+
+Run `/approval-guardian` to report the Prime configuration sources, rejected/weakened controls, reviewer readiness, deadline source, and unsupported controls. Status never prints policy contents, credentials, authentication errors, or configuration values from unknown keys.
+
+Temporary bypass is deliberately unavailable in interactive, print, RPC, and daemon operation. `hasUI` only describes presentation and is not treated as a bypass capability.
+
 ## Security scope
 
-This alpha covers Prime Agent’s built-in IPython preflight only. It is an approval gate, not an OS sandbox. It does not provide Pi shell/path-tool coverage, Prime configuration files, bypass controls, or grants; those belong to later tickets in #10.
+This alpha covers Prime Agent’s built-in whole-cell IPython preflight only. It is an approval gate, not an OS sandbox. It does not provide Pi shell/path-tool coverage or grants. Authentication failure, malformed configuration, unavailable optional host context, capability-analysis failure, and preflight errors remain fail-closed.
 
 ## Native verification
 

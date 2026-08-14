@@ -12,8 +12,14 @@
     "test:pi-install": "node scripts/pi-package-install-smoke.mjs",
     "test:prime-native": "node scripts/prime-tracer-native-smoke.mjs",
     "typecheck": "npm run typecheck --workspace=pi-approval-guardian",
-    "check": "npm run typecheck && npm test && npm run test:artifact && npm run test:pi-install",
+    "check": "npm run typecheck && npm test && npm run test:artifact && npm run test:pi-install && npm run typecheck:prime && npm run test:prime && npm run test:prime-artifact && npm run test:prime-native:if-available",
     "package:check": "npm run test:artifact",
-    "publish:check": "npm publish --dry-run --workspace=pi-approval-guardian"
+    "publish:check": "npm publish --dry-run --workspace=pi-approval-guardian",
+    "test:prime": "npm run test --workspace=prime-approval-guardian",
+    "typecheck:prime": "npm run typecheck --workspace=prime-approval-guardian",
+    "check:prime": "npm run typecheck:prime && npm run test:prime && npm run test:prime-artifact && npm run test:prime-native",
+    "package:prime": "npm pack --dry-run --workspace=prime-approval-guardian",
+    "test:prime-artifact": "node --test scripts/prime-package-artifact.test.mjs",
+    "test:prime-native:if-available": "node scripts/prime-native-if-available.mjs"
   }
 }

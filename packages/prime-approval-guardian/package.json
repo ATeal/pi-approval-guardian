@@ -39,5 +39,13 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": ">=0.80.7 <0.81.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
   }
 }

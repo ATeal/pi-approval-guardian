@@ -126,15 +126,18 @@ export default function fakePrimeSmokeProvider(pi: ExtensionAPI): void {
 		api: "openai-completions",
 		streamSimple,
 		models: [
-			{
-				id: "deterministic",
-				name: "Deterministic native smoke",
+			...[
+				["deterministic", "Deterministic native smoke"],
+				["guardian-reviewer", "Distinct global Guardian reviewer"],
+			].map(([id, name]) => ({
+				id,
+				name,
 				reasoning: false,
-				input: ["text"],
+				input: ["text"] as Array<"text" | "image">,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: 32_000,
 				maxTokens: 1_000,
-			},
+			})),
 		],
 	});
 }

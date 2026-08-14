@@ -1,4 +1,7 @@
 import type { Context } from "@earendil-works/pi-ai";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, join, parse } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	decideGuardianAction,
 	normalizePrimeIpythonAction,
@@ -8,6 +11,7 @@ import {
 	type GuardianReviewResult,
 } from "../src/normalized-decision.ts";
 import { runIsolatedPrimeReview, type PrimeModel, type PrimeReviewerStream } from "../src/reviewer.ts";
+import { loadPrimeGuardianConfig, formatPrimeGuardianStatus, type PrimeGuardianConfig, type PrimeReviewerReadiness } from "../src/config.ts";
 import { lockExactToolInput } from "../src/tool-input-lock.ts";
 
 export type PrimeTracerReviewResult =
@@ -25,9 +29,11 @@ export interface PrimeModelRegistry {
 }
 export interface PrimeExtensionContext { cwd?: string; model?: PrimeModel; modelRegistry?: PrimeModelRegistry; signal?: AbortSignal }
 export type PrimeToolCallHandler = (event: PrimeToolCallEvent, context: PrimeExtensionContext) => Promise<PrimeToolCallResult>;
+export interface PrimeCommandContext extends PrimeExtensionContext { hasUI?: boolean; ui?: { notify(message: string, type?: "info" | "warning" | "error"): void } }
 export interface PrimeExtensionApi {
 	on(name: "tool_call", handler: PrimeToolCallHandler): void;
 	on(name: "turn_start", handler: () => void): void;
+	registerCommand?(name: string, command: { description: string; handler(args: string, context: PrimeCommandContext): Promise<void> | void }): void;
 }
 export interface PrimeApprovalGuardianTracerOptions {
 	review?: PrimeTracerReview;
@@ -35,6 +41,8 @@ export interface PrimeApprovalGuardianTracerOptions {
 	timeoutMs?: number;
 	streamModel?: PrimeReviewerStream;
 	audit?: (decision: NormalizedGuardianDecision) => void;
+	/** Test/embedded-host override. Normal Prime operation resolves this with Prime Agent getAgentDir(). */
+	agentDir?: string;
 }
 
 const OUTCOMES = new Set(["allow", "deny", "failure", "timeout"]);
@@ -47,15 +55,30 @@ export function createPrimeApprovalGuardian(options: PrimeApprovalGuardianTracer
 			if (event.toolName !== "ipython") return;
 			const action = normalizePrimeIpythonAction(event.input, context.cwd ?? process.cwd());
 			if (!action) return block("Prime Approval Guardian blocked malformed IPython input.");
+			let config: PrimeGuardianConfig;
+			try { config = await runtimeConfig(context.cwd ?? process.cwd(), options); }
+			catch { return block("Prime Approval Guardian configuration was unavailable; IPython was blocked."); }
 			const decision = await decideGuardianAction(action, {
 				isCircuitOpen: () => adverseOutcomes >= 3,
-				review: (candidate) => reviewBeforeDeadline(candidate, context, options),
+				review: (candidate) => reviewBeforeDeadline(candidate, context, options, config),
 				protectInput: (identity) => lockExactToolInput(event, identity, guardianInputIdentity),
 				recordCircuitOutcome: (adverse) => { adverseOutcomes = adverse ? adverseOutcomes + 1 : 0; },
 			});
 			options.audit?.(decision);
 			if (decision.verdict === "allow") return;
 			return block(reasonFor(decision.result));
+		});
+		pi.registerCommand?.("approval-guardian", {
+			description: "Show Prime Approval Guardian readiness and configuration sources",
+			handler: async (args, context) => {
+				if (args.trim().toLowerCase() === "bypass") context.ui?.notify("Temporary bypass request rejected; whole-cell review remains active.", "warning");
+				let status: string;
+				try {
+					const config = await runtimeConfig(context.cwd ?? process.cwd(), options);
+					status = formatPrimeGuardianStatus(config, await reviewerReadiness(config, context));
+				} catch { status = "Prime Approval Guardian · fail-closed\nTemporary bypass: unavailable\nConfiguration: unavailable"; }
+				context.ui?.notify(status, "warning");
+			},
 		});
 	};
 }
@@ -64,6 +87,7 @@ async function reviewBeforeDeadline(
 	action: NormalizedGuardianAction,
 	context: PrimeExtensionContext,
 	options: PrimeApprovalGuardianTracerOptions,
+	config: PrimeGuardianConfig,
 ): Promise<GuardianReviewResult> {
 	const controller = new AbortController();
 	const signal = context.signal
@@ -76,7 +100,7 @@ async function reviewBeforeDeadline(
 			? Promise.resolve()
 					.then(() => options.review!(action, signal))
 					.then(normalizeInjectedReview)
-			: realReview(action, context, options, signal);
+			: realReview(action, context, options, config, signal);
 		const outcomes: Array<Promise<GuardianReviewResult>> = [
 			review,
 			new Promise((resolve) => {
@@ -87,7 +111,7 @@ async function reviewBeforeDeadline(
 						message:
 							"Prime Approval Guardian review timeout; IPython was blocked.",
 					});
-				}, options.timeoutMs ?? 90_000);
+				}, options.timeoutMs ?? config.timeoutMs);
 			}),
 		];
 		if (context.signal) {
@@ -116,7 +140,7 @@ async function reviewBeforeDeadline(
 			kind: "failure",
 			message: invalid
 				? "Prime Approval Guardian received an invalid review result; IPython was blocked."
-				: `Prime Approval Guardian review failed; IPython was blocked. ${error instanceof Error ? error.message : String(error)}`,
+				: "Prime Approval Guardian review failed; IPython was blocked.",
 		};
 	} finally {
 		if (timer) clearTimeout(timer);
@@ -124,9 +148,9 @@ async function reviewBeforeDeadline(
 		controller.abort();
 	}
 }
-async function realReview(action: NormalizedGuardianAction, context: PrimeExtensionContext, options: PrimeApprovalGuardianTracerOptions, signal: AbortSignal): Promise<GuardianReviewResult> {
+async function realReview(action: NormalizedGuardianAction, context: PrimeExtensionContext, options: PrimeApprovalGuardianTracerOptions, config: PrimeGuardianConfig, signal: AbortSignal): Promise<GuardianReviewResult> {
 	if (!context.modelRegistry) throw new Error("Reviewer model registry is unavailable.");
-	const configured = options.reviewerModel;
+	const configured = options.reviewerModel ?? config.reviewerModel;
 	let model: PrimeModel | undefined;
 	if (configured) {
 		const slash = configured.indexOf("/");
@@ -149,7 +173,53 @@ async function realReview(action: NormalizedGuardianAction, context: PrimeExtens
 		},
 		signal,
 		options.streamModel,
+		config.policy,
 	);
+}
+
+async function runtimeConfig(cwd: string, options: PrimeApprovalGuardianTracerOptions): Promise<PrimeGuardianConfig> {
+	const agentDir = options.agentDir ?? await primeAgentDir();
+	return loadPrimeGuardianConfig({ cwd, agentDir });
+}
+async function primeAgentDir(): Promise<string> {
+	// Prime Agent is host-provided. First use normal package resolution (SDK/package installs),
+	// then locate the running Prime CLI package without consulting Pi paths or variables.
+	let prime: { getAgentDir?: () => string } | undefined;
+	try {
+		// @ts-expect-error prime-agent is supplied by the compatible Prime host, not the private alpha registry.
+		prime = await import("prime-agent");
+	} catch {
+		const entry = process.argv[1];
+		if (!entry) throw new Error("Prime host entry is unavailable");
+		let directory = dirname(realpathSync(entry));
+		const root = parse(directory).root;
+		while (directory !== root) {
+			try {
+				const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8")) as { name?: unknown };
+				if (manifest.name === "prime-agent") {
+					prime = await import(pathToFileURL(join(directory, "dist", "index.js")).href);
+					break;
+				}
+			} catch { /* keep walking to the host package root */ }
+			directory = dirname(directory);
+		}
+	}
+	if (typeof prime?.getAgentDir !== "function") throw new Error("Prime getAgentDir is unavailable");
+	return prime.getAgentDir();
+}
+async function reviewerReadiness(config: PrimeGuardianConfig, context: PrimeExtensionContext): Promise<PrimeReviewerReadiness> {
+	const registry = context.modelRegistry;
+	if (!registry) return { ready: false, reason: "model unavailable" };
+	let model = context.model;
+	if (config.reviewerModel) {
+		const slash = config.reviewerModel.indexOf("/");
+		model = registry.find?.(config.reviewerModel.slice(0, slash), config.reviewerModel.slice(slash + 1));
+	}
+	if (!model) return { ready: false, reason: "model unavailable" };
+	try {
+		const auth = await registry.getApiKeyAndHeaders(model);
+		return auth.ok ? { ready: true } : { ready: false, reason: "authentication unavailable" };
+	} catch { return { ready: false, reason: "authentication check failed" }; }
 }
 
 function normalizeInjectedReview(value: unknown): GuardianReviewResult {

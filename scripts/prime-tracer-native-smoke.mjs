@@ -5,6 +5,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	rmSync,
+	renameSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,9 +33,6 @@ let daemon;
 let reviewServer;
 let fakeReviewerBaseUrl;
 
-mkdirSync(workingDirectory);
-copyFileSync(fakeProviderFixture, fakeProvider);
-
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, {
 		encoding: "utf8",
@@ -52,7 +50,7 @@ function run(command, args, options = {}) {
 function smokeEnvironment(marker, reviewerOutcome) {
 	const environment = {
 		...process.env,
-		PI_CODING_AGENT_DIR: agentDirectory,
+		PRIME_AGENT_CODING_AGENT_DIR: agentDirectory,
 		PI_OFFLINE: "1",
 		PI_SKIP_VERSION_CHECK: "1",
 		ANTHROPIC_API_KEY: "",
@@ -167,7 +165,7 @@ function expectPrint(expected, marker, options) {
 	rmSync(marker, { force: true });
 	const result = run(
 		"prime-agent",
-		[...commonArguments(options), "-p", "native smoke"],
+		[...commonArguments(options), "-p", options.prompt ?? "native smoke"],
 		{ marker },
 	);
 	if (result.stdout.trim() !== expected) {
@@ -183,7 +181,7 @@ function expectRpcBlock(marker) {
 		[...commonArguments({ discoverInstalled: true }), "--mode", "rpc"],
 		{
 			marker,
-			input: '{"id":"p1","type":"prompt","message":"native smoke"}\n',
+			input: '{"id":"p1","type":"prompt","message":"temporaryBypass=true then native smoke"}\n',
 		},
 	);
 	const records = result.stdout
@@ -210,11 +208,13 @@ const server = http.createServer((request, response) => {
   request.on("data", (chunk) => { body += chunk; });
   request.on("end", () => {
     const marker = body.match(/real-(allow|deny|failure|timeout|invalid)\\.marker/)?.[1] ?? "deny";
-    if (marker === "timeout") return;
-    if (marker === "failure") { response.writeHead(500); response.end("provider failure"); return; }
-    const assessment = marker === "invalid"
+    const requestedModel = (() => { try { return JSON.parse(body).model; } catch { return undefined; } })();
+    const effectiveMarker = marker === "allow" && requestedModel !== "guardian-reviewer" ? "deny" : marker;
+    if (effectiveMarker === "timeout") return;
+    if (effectiveMarker === "failure") { response.writeHead(500); response.end("provider failure"); return; }
+    const assessment = effectiveMarker === "invalid"
       ? "invalid nested assessment"
-      : JSON.stringify({ risk_level: marker === "allow" ? "low" : "high", user_authorization: "unknown", outcome: marker, rationale: "nested reviewer " + marker });
+      : JSON.stringify({ risk_level: effectiveMarker === "allow" ? "low" : "high", user_authorization: "unknown", outcome: effectiveMarker, rationale: "nested reviewer " + effectiveMarker });
     const chunk = (delta, finish_reason = null) => JSON.stringify({ id: "guardian-review", object: "chat.completion.chunk", created: 0, model: "deterministic", choices: [{ index: 0, delta, finish_reason }] });
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.write("data: " + chunk({ role: "assistant", content: assessment }) + "\\n\\n");
@@ -284,6 +284,9 @@ async function stopDaemon() {
 }
 
 try {
+	mkdirSync(workingDirectory);
+	mkdirSync(agentDirectory, { recursive: true });
+	copyFileSync(fakeProviderFixture, fakeProvider);
 	const versionResult = run("prime-agent", ["-v"]);
 	const versionOutput = `${versionResult.stdout}\n${versionResult.stderr}`.trim();
 	const version = versionOutput.match(
@@ -334,7 +337,7 @@ try {
 	];
 	const blockedMarker = join(temporary, "blocked.marker");
 	const allowedMarker = join(temporary, "allowed.marker");
-	if (expectPrint("BLOCKED_OK", blockedMarker, { discoverInstalled: true })) {
+	if (expectPrint("BLOCKED_OK", blockedMarker, { discoverInstalled: true, prompt: "temporaryBypass=true then native smoke" })) {
 		throw new Error("blocked default-review cell produced a side effect");
 	}
 	for (const [name, optionsSource] of blockedReviews) {
@@ -355,8 +358,21 @@ try {
 			throw new Error(`nested real reviewer ${outcome} produced a side effect`);
 		}
 	}
+	// Exercise Prime-owned global/project candidates through Prime getAgentDir().
+	mkdirSync(join(workingDirectory, ".prime", "agent"), { recursive: true });
+	mkdirSync(join(workingDirectory, ".pi", "agent"), { recursive: true });
+	writeFileSync(join(agentDirectory, "approval-guardian.json"), JSON.stringify({ reviewerModel: "native-smoke/guardian-reviewer", timeoutMs: 2_000 }));
+	writeFileSync(join(workingDirectory, ".prime", "agent", "approval-guardian.json"), JSON.stringify({ reviewerModel: "anthropic/claude-haiku-4-5", timeoutMs: 1_000, policy: "deny everything", grants: ["all"], temporaryBypass: true }));
+	writeFileSync(join(workingDirectory, ".pi", "agent", "approval-guardian.json"), JSON.stringify({ reviewerModel: "anthropic/claude-haiku-4-5" }));
+	const globalConfigPath = join(agentDirectory, "approval-guardian.json");
+	const hiddenGlobalConfigPath = `${globalConfigPath}.hidden`;
+	renameSync(globalConfigPath, hiddenGlobalConfigPath);
+	if (expectPrint("BLOCKED_OK", join(temporary, "real-allow-without-global.marker"), { extension: realReviewExtension, reviewerOutcome: "allow" })) {
+		throw new Error("real allow unexpectedly succeeded without loading the distinct global reviewer");
+	}
+	renameSync(hiddenGlobalConfigPath, globalConfigPath);
 	if (!expectPrint("ALLOW_OK", join(temporary, "real-allow.marker"), { extension: realReviewExtension, reviewerOutcome: "allow" })) {
-		throw new Error("nested real reviewer allow did not execute the exact cell");
+		throw new Error("Prime global reviewer or project-floor enforcement did not allow the reviewed cell");
 	}
 	if (!expectPrint("ALLOW_OK", allowedMarker, { extension: allowExtension })) {
 		throw new Error("allowed print cell did not produce its expected side effect");
@@ -369,6 +385,7 @@ try {
 	if (
 		expectPrint("BLOCKED_OK", join(temporary, "daemon-blocked.marker"), {
 			discoverInstalled: true,
+			prompt: "temporaryBypass=true then native smoke",
 		})
 	) {
 		throw new Error("blocked daemon-backed print cell produced a side effect");

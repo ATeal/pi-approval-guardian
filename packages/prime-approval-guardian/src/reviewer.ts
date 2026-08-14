@@ -8,9 +8,9 @@ export interface ReviewerAuth { ok: true; apiKey?: string; headers?: Record<stri
 export interface PrimeModel { provider: string; id: string; api: string; [key: string]: unknown }
 export type PrimeReviewerStream = (model: PrimeModel, context: Context, auth: ReviewerAuth, signal: AbortSignal) => Promise<string>;
 
-export async function runIsolatedPrimeReview(action: NormalizedGuardianAction, model: PrimeModel, auth: ReviewerAuth, signal: AbortSignal, streamModel: PrimeReviewerStream = defaultStreamModel): Promise<GuardianReviewResult> {
+export async function runIsolatedPrimeReview(action: NormalizedGuardianAction, model: PrimeModel, auth: ReviewerAuth, signal: AbortSignal, streamModel: PrimeReviewerStream = defaultStreamModel, policy?: string): Promise<GuardianReviewResult> {
 	const context: Context = {
-		systemPrompt: PRIME_REVIEW_SYSTEM_PROMPT,
+		systemPrompt: policy ? `${PRIME_REVIEW_SYSTEM_PROMPT}\n\nTrusted global reviewer policy:\n${policy}` : PRIME_REVIEW_SYSTEM_PROMPT,
 		messages: [{ role: "user", content: [{ type: "text", text: JSON.stringify(action) }], timestamp: Date.now() }],
 		tools: [],
 	};
