@@ -8,7 +8,7 @@ import primeApprovalGuardian, {
 	type PrimeExtensionApi,
 	type PrimeToolCallHandler,
 	type PrimeTracerReview,
-} from "../packages/prime-approval-guardian/extensions/index.ts";
+} from "../../prime-approval-guardian/extensions/index.ts";
 
 function loadPrimeToolCallHandler(review: PrimeTracerReview): PrimeToolCallHandler {
 	const handlers = new Map<string, PrimeToolCallHandler>();
@@ -112,7 +112,7 @@ test("fails closed on an invalid tracer review result", async () => {
 
 test("packs an explicit Prime-only compatibility tracer", () => {
 	const packageDirectory = new URL(
-		"../packages/prime-approval-guardian/",
+		"../../prime-approval-guardian/",
 		import.meta.url,
 	);
 	const manifest = JSON.parse(

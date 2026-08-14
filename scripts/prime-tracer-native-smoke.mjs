@@ -15,6 +15,8 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageDirectory = join(repository, "packages", "prime-approval-guardian");
 const fakeProviderFixture = join(
 	repository,
+	"packages",
+	"pi-approval-guardian",
 	"tests",
 	"fixtures",
 	"prime-tracer",
