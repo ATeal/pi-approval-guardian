@@ -13,6 +13,8 @@ import primeApprovalGuardian, {
 	type PrimeTracerReview,
 	type PrimeTracerReviewResult,
 } from "../../prime-approval-guardian/extensions/index.ts";
+import { analyzeIpythonCapabilities } from "../../prime-approval-guardian/src/capability-analysis.ts";
+import { sanitizeIpythonCapabilityAnalysis } from "../../prime-approval-guardian/src/normalized-decision.ts";
 
 function loadPrimeToolCallHandler(review: PrimeTracerReview): PrimeToolCallHandler {
 	const handlers = new Map<string, PrimeToolCallHandler>();
@@ -56,8 +58,179 @@ test("allows a benign IPython cell after the deterministic reviewer allows it", 
 		privacy: { privateDataRead: false },
 		payloadState: { complete: true, originalChars: 5, retainedChars: 5 },
 		inputIdentity: requests[0] && (requests[0] as { inputIdentity: string }).inputIdentity,
+		capabilityAnalysis: {
+			authority: "advisory",
+			indicators: [],
+			uncertainties: [],
+			findings: 0,
+			aliasesExamined: 0,
+			inputChars: 5,
+		},
 	});
 	assert.match((requests[0] as { inputIdentity: string }).inputIdentity, /^sha256:[a-f0-9]{64}$/);
+});
+
+
+test("adds advisory capability metadata for direct and aliased calls without changing the whole cell", async (t) => {
+	for (const [name, code, expected] of [
+		["direct", "import requests\nrequests.get('https://example.test')", ["network"]],
+		["aliased", "import subprocess as sp\nrun = sp.run\nrun(['opaque'])", ["process"]],
+	] as const) {
+		await t.test(name, async () => {
+			let reviewed: any;
+			const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+			await handler({ toolName: "ipython", toolCallId: name, input: { code } }, {});
+			assert.equal(reviewed.payload.code, code);
+			assert.deepEqual(reviewed.capabilityAnalysis, {
+				authority: "advisory",
+				indicators: expected,
+				uncertainties: [],
+				findings: 1,
+				aliasesExamined: name === "aliased" ? 2 : 1,
+				inputChars: code.length,
+			});
+		});
+	}
+});
+
+test("reports magic and deliberately unresolved dynamic capabilities in the reviewer envelope", async (t) => {
+	for (const [name, code, indicators, uncertainties] of [
+		["magic", "%%bash\ncurl https://example.test\nrailway up", ["process", "shell-magic", "network", "deployment"], []],
+		["dynamic", "target = choose_at_runtime()\ntarget()", [], ["unknown", "dynamic"]],
+		["dynamic-execution", "fn = eval(name_from_user)", ["dynamic-execution"], ["dynamic"]],
+	] as const) {
+		await t.test(name, async () => {
+			let reviewed: any;
+			const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+			await handler({ toolName: "ipython", toolCallId: name, input: { code } }, {});
+			assert.equal(reviewed.payload.code, code);
+			assert.deepEqual(reviewed.capabilityAnalysis.indicators, indicators);
+			assert.deepEqual(reviewed.capabilityAnalysis.uncertainties, uncertainties);
+			assert.equal(reviewed.capabilityAnalysis.authority, "advisory");
+		});
+	}
+});
+
+test("analysis uncertainty remains explicit and the exact cell is reviewed after bounded analysis adaptation", async (t) => {
+	await t.test("truncated analysis", async () => {
+		const code = `${"x = 1\n".repeat(3_000)}requests.get('not-retained-by-analysis')`;
+		let reviewed: any;
+		const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+		await handler({ toolName: "ipython", toolCallId: "truncated-analysis", input: { code } }, {});
+		assert.equal(reviewed.payload.code, code);
+		assert.deepEqual(reviewed.capabilityAnalysis.uncertainties, ["truncated"]);
+		assert.ok(reviewed.capabilityAnalysis.inputChars > 16_384);
+	});
+	await t.test("unsupported and unterminated lexical states", async () => {
+		for (const code of ["def\0", "print('unterminated"]) {
+			let reviewed: any;
+			const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+			await handler({ toolName: "ipython", toolCallId: "unsupported-analysis", input: { code } }, {});
+			assert.equal(reviewed.payload.code, code);
+			assert.deepEqual(reviewed.capabilityAnalysis.uncertainties, ["unsupported"]);
+		}
+	});
+	await t.test("a fixed analyzer failure still sends the exact cell to review", async () => {
+		const code = "complete_whole_cell()";
+		let reviewed: any;
+		const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+		const originalIncludes = String.prototype.includes;
+		String.prototype.includes = function (search: string, position?: number): boolean {
+			if (String(this) === code && search === "\0") throw new Error("sensitive raw analyzer failure");
+			return originalIncludes.call(this, search, position);
+		};
+		try {
+			await handler({ toolName: "ipython", toolCallId: "failed-analysis", input: { code } }, {});
+		} finally {
+			String.prototype.includes = originalIncludes;
+		}
+		assert.equal(reviewed.payload.code, code);
+		assert.deepEqual(reviewed.capabilityAnalysis, {
+			authority: "advisory", indicators: [], uncertainties: ["failure"], findings: 0,
+			aliasesExamined: 0, inputChars: code.length,
+		});
+	});
+	await t.test("invalid and exotic bounded adapter results become categorical failure", () => {
+		const code = "complete_whole_cell()";
+		const sparse = new Array(1);
+		const getterArray: unknown[] = [];
+		Object.defineProperty(getterArray, "0", { get() { throw new Error("must not run"); }, enumerable: true, configurable: true });
+		getterArray.length = 1;
+		const hostileIterator = ["network"];
+		Object.defineProperty(hostileIterator, Symbol.iterator, { value() { throw new Error("must not iterate"); } });
+		const base = { authority: "advisory", indicators: [], uncertainties: [], findings: 0, aliasesExamined: 0, inputChars: code.length };
+		for (const result of [
+			{ authority: "authoritative" },
+			new Proxy({}, { getOwnPropertyDescriptor() { throw new Error("sensitive raw analyzer failure"); } }),
+			{ ...base, indicators: sparse, findings: 1 },
+			{ ...base, indicators: getterArray, findings: 1 },
+			{ ...base, indicators: hostileIterator, findings: 1 },
+			{ ...base, indicators: ["network", "network"], findings: 2 },
+			{ ...base, indicators: ["network"], findings: 0 },
+		]) {
+			const adapted = sanitizeIpythonCapabilityAnalysis(code.length, result);
+			assert.deepEqual(adapted, {
+				authority: "advisory", indicators: [], uncertainties: ["failure"], findings: 0,
+				aliasesExamined: 0, inputChars: code.length,
+			});
+			assert.doesNotMatch(JSON.stringify(adapted), /sensitive|raw|failure failure/);
+		}
+	});
+});
+
+test("computed dispatch is conservatively unresolved in the reviewer envelope", async (t) => {
+	for (const [name, code] of [
+		["getattr", "getattr(module, name)()"],
+		["globals", "globals()[name]()"],
+		["locals", "locals()[name]()"],
+		["dict", "obj.__dict__[name]()"],
+	] as const) {
+		await t.test(name, async () => {
+			let reviewed: any;
+			const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+			await handler({ toolName: "ipython", toolCallId: name, input: { code } }, {});
+			assert.equal(reviewed.payload.code, code);
+			assert.deepEqual(reviewed.capabilityAnalysis.uncertainties, ["unknown", "dynamic"]);
+		});
+	}
+});
+
+test("alias analysis has bounded representation and fixed category work", () => {
+	const aliases = ["import os as a0"];
+	for (let index = 1; index < 64; index++) aliases.push(`a${index} = a${index - 1}.a${index - 1}`);
+	aliases.push("overflow = a63.a63");
+	const code = `${aliases.join("\n")}\na63()`;
+	const started = Date.now();
+	const result = analyzeIpythonCapabilities(`${code}${" ".repeat(16_384)}`);
+	assert.equal(result.aliasesExamined, 64);
+	assert.deepEqual(result.uncertainties, ["truncated"]);
+	assert.ok(result.indicators.length <= 8);
+	assert.ok(JSON.stringify(result).length <= 1024);
+	assert.ok(Date.now() - started < 2_000, "bounded analysis should finish under a generous regression guard");
+});
+
+test("capability metadata is closed, bounded, categorical, and never authoritative", async () => {
+	const code = [
+		"from pathlib import Path",
+		"import subprocess, requests",
+		"Path('secret').read_text()",
+		"subprocess.run(['secret'])",
+		"requests.post('secret', data='secret')",
+		"%run secret.py",
+		"railway = 1",
+		"skill = 1",
+		"rlm('secret')",
+		"exec('secret')",
+	].join("\n");
+	let reviewed: any;
+	const handler = loadPrimeToolCallHandler((action) => { reviewed = action; return { outcome: "deny" }; });
+	await handler({ toolName: "ipython", toolCallId: "closed", input: { code } }, {});
+	assert.deepEqual(reviewed.capabilityAnalysis.indicators, [
+		"filesystem", "process", "shell-magic", "network", "deployment", "skill", "rlm-subagent", "dynamic-execution",
+	]);
+	const serialized = JSON.stringify(reviewed.capabilityAnalysis);
+	assert.ok(serialized.length <= 1024);
+	assert.doesNotMatch(serialized, /secret|read_text|post|\.py/);
 });
 
 
@@ -159,6 +332,7 @@ test("packs an explicit Prime-only compatibility tracer", () => {
 	assert.match(manifest.description, /Prime Agent/);
 	assert.ok(files.includes("extensions/index.ts"));
 	assert.ok(files.includes("src/normalized-decision.ts"));
+	assert.ok(files.includes("src/capability-analysis.ts"));
 	assert.ok(files.includes("src/shared-decision.ts"));
 	assert.ok(files.includes("src/reviewer.ts"));
 	assert.ok(files.includes("src/tool-input-lock.ts"));

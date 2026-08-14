@@ -13,9 +13,15 @@ The extension intercepts every Prime Agent `ipython` call, normalizes the exact 
 
 The reviewer receives only a new context containing the Guardian system prompt and the normalized whole-cell action. It receives no main-conversation messages and no tools, extensions, skills, project context, IPython, shell, or write capability. Reviewer output must be one strict assessment object.
 
+## Advisory capability analysis
+
+Before review, a pure bounded lexical pass annotates the normalized action with closed, categorical indicators for filesystem, process, shell magic, network, deployment, skill, RLM/subagent, and dynamic execution capabilities. Unknown, dynamic, unsupported, truncated, and failed analysis remain explicit uncertainties. The pass retains no snippets, arguments, paths, identifiers, environment values, secrets, or raw errors. Its source prefix, aliases, findings, rules, and output schema are fixed-size.
+
+These indicators are advisory evidence only. They do not authorize an action, claim containment, or replace review of the exact complete cell. If annotation fails, the failure uncertainty and unchanged whole cell still go to the reviewer; normal deny/failure/timeout behavior remains fail closed.
+
 ## Security scope
 
-This alpha covers Prime Agent’s built-in IPython preflight only. It is an approval gate, not an OS sandbox. It does not provide Pi shell/path-tool coverage, Prime configuration files, capability indicators, bypass controls, or grants; those belong to later tickets in #10.
+This alpha covers Prime Agent’s built-in IPython preflight only. It is an approval gate, not an OS sandbox. It does not provide Pi shell/path-tool coverage, Prime configuration files, bypass controls, or grants; those belong to later tickets in #10.
 
 ## Native verification
 

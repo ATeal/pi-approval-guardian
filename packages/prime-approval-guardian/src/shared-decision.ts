@@ -30,6 +30,29 @@ export interface NormalizedGuardianAction {
 		retainedChars: number;
 	};
 	inputIdentity: string;
+	capabilityAnalysis?: {
+		authority: "advisory";
+		indicators: Array<
+			| "filesystem"
+			| "process"
+			| "shell-magic"
+			| "network"
+			| "deployment"
+			| "skill"
+			| "rlm-subagent"
+			| "dynamic-execution"
+		>;
+		uncertainties: Array<
+			| "unknown"
+			| "dynamic"
+			| "unsupported"
+			| "truncated"
+			| "failure"
+		>;
+		findings: number;
+		aliasesExamined: number;
+		inputChars: number;
+	};
 }
 
 export interface GuardianDecisionAudit {
