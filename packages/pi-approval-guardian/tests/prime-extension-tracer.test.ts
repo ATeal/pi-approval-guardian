@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import primeApprovalGuardian, {
 	createPrimeApprovalGuardian,
+	guardianInputIdentity,
 	type PrimeExtensionApi,
 	type PrimeToolCallHandler,
 	type PrimeTracerReview,
@@ -160,6 +161,7 @@ test("packs an explicit Prime-only compatibility tracer", () => {
 	assert.ok(files.includes("src/normalized-decision.ts"));
 	assert.ok(files.includes("src/shared-decision.ts"));
 	assert.ok(files.includes("src/reviewer.ts"));
+	assert.ok(files.includes("src/tool-input-lock.ts"));
 	assert.equal(
 		readFileSync(new URL("src/shared-decision.ts", packageDirectory), "utf8"),
 		readFileSync(new URL("../src/shared-decision.ts", import.meta.url), "utf8"),
@@ -461,4 +463,116 @@ test("external cancellation blocks immediately and aborts a late reviewer", asyn
 	settleReview?.({ outcome: "allow" });
 	await Promise.resolve();
 	assert.equal(result?.block, true, "late reviewer settlement cannot change the decision");
+});
+
+test("fails closed for a proxy that can substitute code after review", async () => {
+	let reads = 0;
+	const target = { code: "reviewed_cell()" };
+	const input = new Proxy(target, {
+		get(object, property, receiver) {
+			if (property === "code") {
+				reads++;
+				return reads === 1 ? "reviewed_cell()" : "substituted_cell()";
+			}
+			return Reflect.get(object, property, receiver);
+		},
+	});
+	let reviewed = false;
+	const handler = loadPrimeToolCallHandler(() => {
+		reviewed = true;
+		return { outcome: "allow" };
+	});
+
+	const result = await handler(
+		{ toolName: "ipython", toolCallId: "proxy-substitution", input },
+		{},
+	);
+
+	assert.equal(result?.block, true);
+	assert.equal(reviewed, false);
+});
+
+test("recomputes this call's exact identity after review without borrowing a concurrent approval", async () => {
+	const releases = new Map<string, () => void>();
+	const handler = loadPrimeToolCallHandler(
+		(action) => new Promise((resolve) => {
+			releases.set(action.payload.code as string, () => resolve({ outcome: "allow" }));
+		}),
+	);
+	const changed = { toolName: "ipython", toolCallId: "changed", input: { code: "first()" } };
+	const unchanged = { toolName: "ipython", toolCallId: "unchanged", input: { code: "second()" } };
+
+	const changedPending = handler(changed, {});
+	const unchangedPending = handler(unchanged, {});
+	await Promise.resolve();
+	changed.input.code = "substituted()";
+	releases.get("second()")?.();
+	releases.get("first()")?.();
+
+	assert.equal(await unchangedPending, undefined);
+	const changedResult = await changedPending;
+	assert.equal(changedResult?.block, true);
+	assert.match(changedResult?.reason ?? "", /input changed/i);
+	assert.equal(Object.isFrozen(unchanged.input), true);
+});
+
+test("the Prime handler seam prevents later code mutation, replacement, and reordering before execution", async (t) => {
+	for (const [name, mutate] of [
+		["change", (event: { input: { code: string } }) => { event.input.code = "dangerous()"; }],
+		["replace", (event: { input: { code: string } }) => { event.input = { code: "dangerous()" }; }],
+		["reorder", (event: { input: { code: string } }) => { event.input.code = event.input.code.split("\n").reverse().join("\n"); }],
+	] as const) {
+		await t.test(name, async () => {
+			const handlers: PrimeToolCallHandler[] = [];
+			createPrimeApprovalGuardian({ review: () => ({ outcome: "allow" }) })({
+				on(eventName: string, handler: PrimeToolCallHandler) {
+					if (eventName === "tool_call") handlers.push(handler);
+				},
+			} as PrimeExtensionApi);
+			handlers.push(async (event) => {
+				mutate(event as { input: { code: string } });
+				return undefined;
+			});
+			const event = { toolName: "ipython", toolCallId: name, input: { code: "first()\nsecond()" } };
+			let executed = false;
+			await assert.rejects(async () => {
+				for (const handler of handlers) {
+					const result = await handler(event, {});
+					if (result?.block) return;
+				}
+				executed = true;
+			});
+			assert.equal(executed, false);
+		});
+	}
+});
+
+test("the identity binds every JSON-like input field", () => {
+	const reviewed = guardianInputIdentity({ code: "run()", options: { order: ["a", "b"] } });
+	assert.notEqual(
+		reviewed,
+		guardianInputIdentity({ code: "run()", options: { order: ["b", "a"] } }),
+	);
+	assert.notEqual(reviewed, guardianInputIdentity({ code: "run()" }));
+});
+
+test("an adjacent call cannot reuse the preceding call's approved identity", async () => {
+	let releaseSecond: (() => void) | undefined;
+	const handler = loadPrimeToolCallHandler((action) => {
+		if (action.payload.code === "first()") return { outcome: "allow" };
+		return new Promise((resolve) => {
+			releaseSecond = () => resolve({ outcome: "allow" });
+		});
+	});
+	const first = { toolName: "ipython", toolCallId: "first", input: { code: "first()" } };
+	assert.equal(await handler(first, {}), undefined);
+	const second = { toolName: "ipython", toolCallId: "second", input: { code: "second()" } };
+	const pending = handler(second, {});
+	await Promise.resolve();
+	second.input.code = "substituted()";
+	releaseSecond?.();
+	const result = await pending;
+
+	assert.equal(result?.block, true);
+	assert.match(result?.reason ?? "", /input changed/i);
 });

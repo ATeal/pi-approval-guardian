@@ -8,6 +8,7 @@ import {
 	type GuardianReviewResult,
 } from "../src/normalized-decision.ts";
 import { runIsolatedPrimeReview, type PrimeModel, type PrimeReviewerStream } from "../src/reviewer.ts";
+import { lockExactToolInput } from "../src/tool-input-lock.ts";
 
 export type PrimeTracerReviewResult =
 	| { outcome: "allow" }
@@ -49,7 +50,7 @@ export function createPrimeApprovalGuardian(options: PrimeApprovalGuardianTracer
 			const decision = await decideGuardianAction(action, {
 				isCircuitOpen: () => adverseOutcomes >= 3,
 				review: (candidate) => reviewBeforeDeadline(candidate, context, options),
-				protectInput: (identity) => lockExactInput(event, identity),
+				protectInput: (identity) => lockExactToolInput(event, identity, guardianInputIdentity),
 				recordCircuitOutcome: (adverse) => { adverseOutcomes = adverse ? adverseOutcomes + 1 : 0; },
 			});
 			options.audit?.(decision);
@@ -158,16 +159,6 @@ function normalizeInjectedReview(value: unknown): GuardianReviewResult {
 	if (outcome === "allow") return { kind: "allowed", assessment: { risk_level: "low", user_authorization: "unknown", outcome: "allow", rationale: "Deterministic test reviewer allowed the action." } };
 	if (outcome === "deny") return { kind: "denied", assessment: { risk_level: "high", user_authorization: "unknown", outcome: "deny", rationale: reason ?? "The reviewer denied the cell." } };
 	return { kind: outcome, message: reason ?? `Prime Approval Guardian ${outcome}.` } as GuardianReviewResult;
-}
-function lockExactInput(event: PrimeToolCallEvent, expected: string): void {
-	if (guardianInputIdentity(event.input) !== expected) throw new Error("Tool input changed after Guardian review began.");
-	freezeJson(event.input);
-	const descriptor = Object.getOwnPropertyDescriptor(event, "input");
-	Object.defineProperty(event, "input", { value: event.input, enumerable: descriptor?.enumerable ?? true, writable: false, configurable: false });
-}
-function freezeJson(value: unknown, seen = new WeakSet<object>()): void {
-	if (typeof value !== "object" || value === null || seen.has(value)) return;
-	seen.add(value); for (const key of Reflect.ownKeys(value)) { const d = Object.getOwnPropertyDescriptor(value, key); if (d && "value" in d) freezeJson(d.value, seen); } Object.freeze(value);
 }
 function reasonFor(result: GuardianReviewResult): string {
 	if (result.kind === "denied") return result.assessment.rationale;

@@ -320,6 +320,19 @@ test("computes deterministic identities only for complete JSON-like input", () =
 	});
 	assert.throws(() => guardianInputIdentity(accessorArray), /invalid input array entry/);
 	assert.equal(getterCalls, 0, "input identity must never invoke an array accessor");
+	assert.notEqual(
+		guardianInputIdentity({ value: -0 }),
+		guardianInputIdentity({ value: 0 }),
+		"negative zero must retain its exact numeric identity",
+	);
+	const sharedChild = { value: "same" };
+	assert.throws(
+		() => guardianInputIdentity({ first: sharedChild, second: sharedChild }),
+		/repeated input reference/,
+	);
+	assert.doesNotThrow(() =>
+		guardianInputIdentity({ first: { value: "same" }, second: { value: "same" } }),
+	);
 	const sparseArray: unknown[] & { extra?: string } = [];
 	sparseArray.length = 1;
 	sparseArray.extra = "not-an-index";

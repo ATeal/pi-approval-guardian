@@ -139,8 +139,18 @@ export function enforceNormalizedActionRequirements(
 }
 
 export function guardianInputIdentity(value: unknown): string {
+	const canonical = canonicalJson(value);
+	let clone: unknown;
+	try {
+		clone = structuredClone(value);
+	} catch {
+		throw new Error("input cannot be safely cloned");
+	}
+	if (canonicalJson(clone) !== canonical) {
+		throw new Error("input changes when safely cloned");
+	}
 	return `sha256:${createHash("sha256")
-		.update(canonicalJson(value), "utf8")
+		.update(canonical, "utf8")
 		.digest("hex")}`;
 }
 
@@ -166,17 +176,23 @@ function safeError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function canonicalJson(value: unknown, active = new WeakSet<object>()): string {
+function canonicalJson(
+	value: unknown,
+	active = new WeakSet<object>(),
+	seen = new WeakSet<object>(),
+): string {
 	if (value === null || typeof value === "string" || typeof value === "boolean") {
 		return JSON.stringify(value);
 	}
 	if (typeof value === "number") {
 		if (!Number.isFinite(value)) throw new Error("non-finite input number");
-		return JSON.stringify(value);
+		return Object.is(value, -0) ? "-0" : JSON.stringify(value);
 	}
 	if (typeof value !== "object") throw new Error(`non-JSON input ${typeof value}`);
 	if (active.has(value)) throw new Error("cyclic input");
+	if (seen.has(value)) throw new Error("repeated input reference");
 	active.add(value);
+	seen.add(value);
 	try {
 		if (Array.isArray(value)) {
 			if (Object.getPrototypeOf(value) !== Array.prototype) {
@@ -190,7 +206,7 @@ function canonicalJson(value: unknown, active = new WeakSet<object>()): string {
 				if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
 					throw new Error("invalid input array entry");
 				}
-				entries.push(canonicalJson(descriptor.value, active));
+				entries.push(canonicalJson(descriptor.value, active, seen));
 			}
 			return `[${entries.join(",")}]`;
 		}
@@ -209,7 +225,7 @@ function canonicalJson(value: unknown, active = new WeakSet<object>()): string {
 				if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
 					throw new Error("invalid input property");
 				}
-				return `${JSON.stringify(key)}:${canonicalJson(descriptor.value, active)}`;
+				return `${JSON.stringify(key)}:${canonicalJson(descriptor.value, active, seen)}`;
 			})
 			.join(",")}}`;
 	} finally {
