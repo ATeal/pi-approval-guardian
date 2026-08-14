@@ -21,6 +21,11 @@ import {
 	buildPrivateDataReviewSystemPrompt,
 } from "../src/policy.ts";
 import {
+	decideGuardianAction,
+	guardianInputIdentity,
+	normalizePiBashAction,
+} from "../src/normalized-decision.ts";
+import {
 	formatReviewResult,
 	rejectionReason,
 	reviewResultDiagnostic,
@@ -46,7 +51,20 @@ import {
 	shouldInvalidateDirectoryScanCache,
 	toolCallBatchInfo,
 } from "../src/tool-actions.ts";
-import { lockAllowedToolInput } from "../src/tool-input-lock.ts";
+import {
+	lockAllowedToolInput,
+	lockReviewedToolInput,
+} from "../src/tool-input-lock.ts";
+
+export {
+	decideGuardianAction,
+	guardianInputIdentity,
+	normalizePiBashAction,
+	type GuardianDecisionAudit,
+	type GuardianDecisionServices,
+	type NormalizedGuardianAction,
+	type NormalizedGuardianDecision,
+} from "../src/normalized-decision.ts";
 
 export {
 	guardianHealth,
@@ -315,23 +333,42 @@ export default function approvalGuardian(
 			);
 			if (!action) return;
 
-			if (circuitBreaker.isOpen()) {
-				const result: GuardianReviewResult = {
-					kind: "circuit-open",
-					message: "Repeated adverse Guardian outcomes reached the per-turn limit.",
-				};
-				ctx.ui.notify(formatReviewResult(result, action), "error");
-				return { block: true, reason: rejectionReason(result) };
-			}
-
-			const reviewed = await reviewAction(action, config, ctx);
-			const result = lockAllowedToolInput(
-				event,
-				enforceActionRequirements(action, reviewed),
-			);
-			const circuitOutcome = circuitOutcomeForReview(result);
-			if (circuitOutcome !== undefined) {
-				reviewBatches.record(batch.id, circuitOutcome);
+			let result: GuardianReviewResult;
+			if (action.tool === "bash") {
+				const normalizedAction = normalizePiBashAction(action, event.input);
+				const decision = await decideGuardianAction(normalizedAction, {
+					isCircuitOpen: () => circuitBreaker.isOpen(),
+					review: (candidate) => reviewAction(candidate, config, ctx),
+					protectInput: (expectedInputIdentity) => {
+						if (guardianInputIdentity(event.input) !== expectedInputIdentity) {
+							throw new Error(
+								"Tool input changed after Guardian review began.",
+							);
+						}
+						lockReviewedToolInput(event);
+					},
+					recordCircuitOutcome: (adverse) =>
+						reviewBatches.record(batch.id, adverse),
+				});
+				result = decision.result;
+			} else {
+				if (circuitBreaker.isOpen()) {
+					result = {
+						kind: "circuit-open",
+						message:
+							"Repeated adverse Guardian outcomes reached the per-turn limit.",
+					};
+				} else {
+					const reviewed = await reviewAction(action, config, ctx);
+					result = lockAllowedToolInput(
+						event,
+						enforceActionRequirements(action, reviewed),
+					);
+					const circuitOutcome = circuitOutcomeForReview(result);
+					if (circuitOutcome !== undefined) {
+						reviewBatches.record(batch.id, circuitOutcome);
+					}
+				}
 			}
 			if (result.kind === "allowed") {
 				ctx.ui.notify(formatReviewResult(result, action), "info");
