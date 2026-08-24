@@ -70,17 +70,24 @@ export interface ApprovalGuardianOptions {
 	directoryScanCache?: DirectoryScanCache;
 }
 
+export const APPROVAL_GUARDIAN_BYPASS_CONTROL_EVENT =
+	"approval-guardian:set-temporary-bypass";
+export const APPROVAL_GUARDIAN_BYPASS_STATE_EVENT =
+	"approval-guardian:temporary-bypass-state";
+
+export interface ApprovalGuardianBypassControlRequest {
+	active: boolean;
+	handled?: boolean;
+}
+
 // Extension wiring intentionally coordinates lifecycle, UI, policy, and reviewer state.
 // pi-lens-ignore: high-complexity, high-fan-out
 export default function approvalGuardian(
 	pi: ExtensionAPI,
 	options: ApprovalGuardianOptions = {},
 ) {
-	type GuardianCommandContext = Parameters<
-		Parameters<typeof pi.registerCommand>[1]["handler"]
-	>[1];
-
 	let temporaryBypassActive = false;
+	let runtimeContext: ExtensionContext | undefined;
 	let configurationWarningKey: string | undefined;
 	const reviewerSwitchNoticeKeys = new Set<string>();
 	const controllers = new Map<string, ReviewerSessionController>();
@@ -172,6 +179,7 @@ export default function approvalGuardian(
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		runtimeContext = ctx;
 		const wasBypassed = temporaryBypassActive;
 		resetRuntime();
 		if (wasBypassed) clearBypassWarning(ctx);
@@ -180,6 +188,7 @@ export default function approvalGuardian(
 	pi.on("session_shutdown", (_event, ctx) => {
 		resetRuntime();
 		clearBypassWarning(ctx);
+		runtimeContext = undefined;
 	});
 	pi.on("input", (event) => {
 		directUserInputTracker.observe(event);
@@ -198,19 +207,21 @@ export default function approvalGuardian(
 		if (record) pi.appendEntry(DIRECT_USER_INPUT_ENTRY_TYPE, record);
 	});
 
-	const setTemporaryBypass = async (
+	const setTemporaryBypass = (
 		nextActive: boolean,
-		ctx: GuardianCommandContext,
-	): Promise<void> => {
+		ctx: ExtensionContext,
+	): void => {
 		if (nextActive && ctx.mode !== "tui") {
 			throw new Error(
 				"Temporary Approval Guardian bypass requires interactive TUI mode so the persistent warning remains visible.",
 			);
 		}
-		await ctx.waitForIdle();
 		if (temporaryBypassActive === nextActive) {
 			if (nextActive) showBypassWarning(ctx);
 			else clearBypassWarning(ctx);
+			pi.events?.emit(APPROVAL_GUARDIAN_BYPASS_STATE_EVENT, {
+				active: temporaryBypassActive,
+			});
 			ctx.ui.notify(
 				nextActive
 					? "Approval Guardian is already temporarily bypassed. Run /approval-guardian enable to restore protection."
@@ -220,14 +231,17 @@ export default function approvalGuardian(
 			return;
 		}
 
+		temporaryBypassActive = nextActive;
 		disposeReviewerControllers();
 		reviewerSwitchNoticeKeys.clear();
 		circuitBreaker.reset();
 		reviewBatches.reset();
 		directoryScanCache.clear();
 		if (nextActive) {
-			temporaryBypassActive = true;
 			showBypassWarning(ctx);
+			pi.events?.emit(APPROVAL_GUARDIAN_BYPASS_STATE_EVENT, {
+				active: temporaryBypassActive,
+			});
 			ctx.ui.notify(
 				[
 					"Approval Guardian is temporarily BYPASSED.",
@@ -239,14 +253,24 @@ export default function approvalGuardian(
 			return;
 		}
 
-		temporaryBypassActive = false;
 		clearBypassWarning(ctx);
+		pi.events?.emit(APPROVAL_GUARDIAN_BYPASS_STATE_EVENT, {
+			active: temporaryBypassActive,
+		});
 		syncGuardianRuntimeHealth(ctx, statusCallbacks);
 		ctx.ui.notify(
 			"Approval Guardian is enabled again. Covered agent tool calls once again require Guardian review.",
 			"info",
 		);
 	};
+
+	pi.events?.on(APPROVAL_GUARDIAN_BYPASS_CONTROL_EVENT, (data: unknown) => {
+		if (!data || typeof data !== "object" || !runtimeContext) return;
+		const request = data as Partial<ApprovalGuardianBypassControlRequest>;
+		if (typeof request.active !== "boolean") return;
+		setTemporaryBypass(request.active, runtimeContext);
+		request.handled = true;
+	});
 
 	const commandArguments = [
 		{
@@ -325,6 +349,10 @@ export default function approvalGuardian(
 			}
 
 			const reviewed = await reviewAction(action, config, ctx);
+			// Bypass may be activated while reviewer inference is in flight. The
+			// mode transition disposes the reviewer; this second check ensures its
+			// cancellation does not fail closed after the user has enabled bypass.
+			if (temporaryBypassActive) return;
 			const result = lockAllowedToolInput(
 				event,
 				enforceActionRequirements(action, reviewed),

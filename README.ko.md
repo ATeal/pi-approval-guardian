@@ -159,7 +159,7 @@ bypass가 활성화된 동안 editor 아래에 한 줄 warning이 계속 표시�
 /approval-guardian enable
 ```
 
-Command는 active agent run이 완전히 settle될 때까지 기다린 뒤 state를 전환합니다. 이미 block된 call을 release/retry하지 않고, 새 agent turn을 시작하지 않으며, agent에 추가 authorization을 부여하지도 않습니다. bypass는 memory-only이며 `/reload`, `/new`, `/resume`, `/fork`, process restart 시 자동으로 해제됩니다. Interactive TUI mode에서만 활성화할 수 있으며 persistent warning을 보장할 수 없는 RPC, JSON, print mode에서는 거부됩니다.
+Command는 active agent run 도중에도 state를 즉시 전환합니다. bypass를 활성화하면 in-flight reviewer가 취소되고 대기 중인 protected tool call은 계속 진행됩니다. 단, 이미 block된 call을 release/retry하지 않고, 새 agent turn을 시작하지 않으며, agent에 추가 authorization을 부여하지도 않습니다. bypass는 memory-only이며 `/reload`, `/new`, `/resume`, `/fork`, process restart 시 자동으로 해제됩니다. Interactive TUI mode에서만 활성화할 수 있으며 persistent warning을 보장할 수 없는 RPC, JSON, print mode에서는 거부됩니다.
 
 bypass/enable 알림은 UI-only입니다. Guardian은 이 control state를 agent context에 의도적으로 주입하지 않습니다. 영구적인 “bypassed” message는 재활성화 후 stale해지거나 permission으로 오해될 수 있습니다. 수행할 작업은 agent에 별도로 명확히 지시해야 합니다.
 

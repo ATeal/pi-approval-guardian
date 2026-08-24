@@ -98,7 +98,7 @@ Reviewer channels are tried in this order after deduplicating equivalent model i
 
 ## Temporary runtime bypass
 
-`/approval-guardian bypass` enables an explicit, in-memory bypass after waiting for the current agent run and queued continuations to settle. `/approval-guardian enable` ends it. Both commands are idempotent. Activation is restricted to interactive TUI mode; RPC, JSON, and print modes are refused because their clients can ignore or fail to retain fire-and-forget status updates, so a persistent warning cannot be guaranteed.
+`/approval-guardian bypass` enables an explicit, in-memory bypass immediately, including during the current agent run or queued continuations. `/approval-guardian enable` ends it immediately. Both commands are idempotent. Activation is restricted to interactive TUI mode; RPC, JSON, and print modes are refused because their clients can ignore or fail to retain fire-and-forget status updates, so a persistent warning cannot be guaranteed.
 
 While bypass is active:
 
@@ -107,9 +107,10 @@ While bypass is active:
 - no per-action Guardian allow/block notification is emitted because the action was not reviewed;
 - other extensions and tool-internal checks remain active; bypass disables only Approval Guardian's hook;
 - cached reviewer controllers are disposed and circuit/batch state is reset across each mode transition;
+- a covered call whose reviewer inference is still in flight when bypass activates is permitted to continue without approved-input locking or a per-action review notice;
 - `/approval-guardian` reports `reviews disabled` plus the underlying reviewer readiness, without claiming that current execution is fail-closed.
 
-The bypass does not release or retry an already blocked/in-flight tool call, trigger an agent turn, or grant task authorization. It is not persisted to the session file and resets on every `session_start` lifecycle, including startup/reload/new/resume/fork, as well as process restart.
+The bypass does not release or retry an already blocked tool call, trigger an agent turn, or grant task authorization. It is not persisted to the session file and resets on every `session_start` lifecycle, including startup/reload/new/resume/fork, as well as process restart.
 
 Guardian intentionally does not inject bypass or re-enable state into agent messages, the system prompt, or other model context. A one-shot persisted “bypassed” message could remain stale after re-enabling and could be misread as permission; the user must separately instruct the agent what work to perform. The persistent below-editor widget is the user-facing safety signal.
 

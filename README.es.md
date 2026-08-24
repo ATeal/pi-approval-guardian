@@ -159,7 +159,7 @@ Mientras el bypass está activo, una advertencia de una línea permanece debajo 
 /approval-guardian enable
 ```
 
-El comando espera a que termine por completo el agent run activo antes de cambiar el estado. No libera ni reintenta una llamada ya bloqueada, no inicia un nuevo agent turn y no concede autorización adicional al agent. El bypass solo vive en memoria y se restablece con `/reload`, `/new`, `/resume`, `/fork` o al reiniciar el proceso. Solo puede activarse en el modo TUI interactivo; RPC, JSON y print lo rechazan porque no pueden garantizar una advertencia persistente.
+El comando cambia el estado de inmediato, incluso durante un agent run activo. Activar el bypass cancela cualquier reviewer en curso y permite que continúe su tool call protegida pendiente; no libera ni reintenta una llamada ya bloqueada, no inicia un nuevo agent turn y no concede autorización adicional al agent. El bypass solo vive en memoria y se restablece con `/reload`, `/new`, `/resume`, `/fork` o al reiniciar el proceso. Solo puede activarse en el modo TUI interactivo; RPC, JSON y print lo rechazan porque no pueden garantizar una advertencia persistente.
 
 Las notificaciones de bypass/enable son solo para la UI. Guardian no inyecta deliberadamente este estado de control en el contexto del agent: un mensaje persistente de “bypassed” podría quedar obsoleto después de reactivar la protección o interpretarse como permiso. Da al agent una instrucción separada y explícita sobre el trabajo que quieres realizar.
 

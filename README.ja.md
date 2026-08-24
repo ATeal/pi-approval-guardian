@@ -159,7 +159,7 @@ bypass 中は editor 下に 1 行の warning が継続表示されます。bypas
 /approval-guardian enable
 ```
 
-Command は active agent run が完全に settle するまで待ってから state を切り替えます。すでに block された call を release/retry せず、新しい agent turn を開始せず、agent への追加 authorization にもなりません。bypass は memory-only で、`/reload`、`/new`、`/resume`、`/fork`、process restart で自動的に解除されます。Interactive TUI mode でのみ有効化でき、persistent warning を保証できない RPC、JSON、print mode では拒否されます。
+Command は active agent run の途中でも state を即座に切り替えます。bypass を有効にすると in-flight reviewer が破棄され、その pending protected tool call は続行できます。ただし、すでに block された call を release/retryせず、新しい agent turn を開始せず、agent への追加 authorization にもなりません。bypass は memory-only で、`/reload`、`/new`、`/resume`、`/fork`、process restart で自動的に解除されます。Interactive TUI mode でのみ有効化でき、persistent warning を保証できない RPC、JSON、print mode では拒否されます。
 
 bypass/enable notice は UI-only です。Guardian はこの control state を agent context に意図的に注入しません。永続化された「bypassed」message は再有効化後に stale になったり、permission と誤解されたりする可能性があります。実行してほしい作業は agent に別途明示してください。
 

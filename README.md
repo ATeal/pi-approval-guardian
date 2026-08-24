@@ -190,7 +190,7 @@ A one-line warning remains below the editor for the entire bypass. Covered agent
 /approval-guardian enable
 ```
 
-The command waits for the active agent run to settle. It does not release or retry a call that was already blocked, trigger a new agent turn, or grant the agent additional authorization. The bypass is memory-only and resets on `/reload`, `/new`, `/resume`, `/fork`, or process restart. Activation is limited to interactive TUI mode; RPC, JSON, and print modes are refused because a persistent warning cannot be guaranteed.
+The command changes state immediately, including during an active agent run. Activating bypass disposes any in-flight reviewer and permits its pending covered tool call to continue; it does not release or retry a call that was already blocked, trigger a new agent turn, or grant the agent additional authorization. The bypass is memory-only and resets on `/reload`, `/new`, `/resume`, `/fork`, or process restart. Activation is limited to interactive TUI mode; RPC, JSON, and print modes are refused because a persistent warning cannot be guaranteed.
 
 Bypass and enable notices are UI-only. Guardian intentionally does not inject this control state into agent context: a persisted “bypassed” message could become stale after re-enabling and could be misread as permission. Give the agent a separate, explicit instruction for the work you want performed.
 

@@ -11,6 +11,8 @@ import test from "node:test";
 import type { ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import approvalGuardian, {
 	actionFromToolCall,
+	APPROVAL_GUARDIAN_BYPASS_CONTROL_EVENT,
+	APPROVAL_GUARDIAN_BYPASS_STATE_EVENT,
 	enforceActionRequirements,
 	guardianHealth,
 	lockAllowedToolInput,
@@ -1251,6 +1253,19 @@ test("reports lifecycle health without writing footer status", async () => {
 
 test("temporarily bypasses reviews with only a persistent below-editor warning", async () => {
 	const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
+	const busHandlers = new Map<string, Array<(data: unknown) => void>>();
+	const emittedEvents: Array<{ name: string; data: unknown }> = [];
+	const events = {
+		on: (name: string, handler: (data: unknown) => void) => {
+			const registered = busHandlers.get(name) ?? [];
+			registered.push(handler);
+			busHandlers.set(name, registered);
+		},
+		emit: (name: string, data: unknown) => {
+			emittedEvents.push({ name, data });
+			for (const handler of busHandlers.get(name) ?? []) handler(data);
+		},
+	};
 	const commands = new Map<
 		string,
 		{
@@ -1261,6 +1276,7 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		}
 	>();
 	approvalGuardian({
+		events,
 		on: (name: string, handler: (event: unknown, ctx: never) => unknown) => {
 			handlers.set(name, handler);
 		},
@@ -1284,8 +1300,15 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 	process.env.PI_APPROVAL_GUARDIAN_MODEL = "test/reviewer";
 	process.env.PI_APPROVAL_GUARDIAN_FALLBACK_MODEL = "test/reviewer";
 	let reviewCalls = 0;
+	let holdReview = false;
+	let releaseReview: (() => void) | undefined;
 	ReviewerSessionController.prototype.review = async function () {
 		reviewCalls++;
+		if (holdReview) {
+			await new Promise<void>((resolve) => {
+				releaseReview = resolve;
+			});
+		}
 		return {
 			kind: "allowed",
 			assessment: {
@@ -1302,7 +1325,6 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		[string, string[] | undefined, { placement?: string } | undefined]
 	> = [];
 	const notices: string[] = [];
-	let waitForIdleCalls = 0;
 	let branchReads = 0;
 	let mode = "tui";
 	let branch: unknown[] = [];
@@ -1330,7 +1352,7 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		signal: undefined,
 		abort: () => undefined,
 		waitForIdle: async () => {
-			waitForIdleCalls++;
+			throw new Error("bypass must not wait for idle");
 		},
 		ui: {
 			theme: {
@@ -1358,8 +1380,17 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		);
 
 		notices.length = 0;
-		await command.handler("bypass", ctx);
-		assert.equal(waitForIdleCalls, 1);
+		const controlRequest = { active: true, handled: false };
+		events.emit(APPROVAL_GUARDIAN_BYPASS_CONTROL_EVENT, controlRequest);
+		assert.equal(controlRequest.handled, true);
+		assert.equal(
+			emittedEvents.some(
+				({ name, data }) =>
+					name === APPROVAL_GUARDIAN_BYPASS_STATE_EVENT &&
+					(data as { active?: boolean }).active === true,
+			),
+			true,
+		);
 		assert.equal(statuses.length, 0);
 		assert.equal(widgets.at(-1)?.[0], "approval-guardian-bypass");
 		assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /BYPASSED/);
@@ -1388,13 +1419,11 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 
 		notices.length = 0;
 		await command.handler("bypass", ctx);
-		assert.equal(waitForIdleCalls, 2);
 		assert.match(notices.join("\n"), /already temporarily bypassed/);
 		assert.equal(statuses.length, 0);
 
 		notices.length = 0;
 		await command.handler("enable", ctx);
-		assert.equal(waitForIdleCalls, 3);
 		assert.equal(statuses.length, 0);
 		assert.deepEqual(widgets.at(-1), [
 			"approval-guardian-bypass",
@@ -1405,9 +1434,40 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 
 		notices.length = 0;
 		await command.handler("enable", ctx);
-		assert.equal(waitForIdleCalls, 4);
 		assert.match(notices.join("\n"), /already enabled/);
 		assert.equal(statuses.length, 0);
+
+		branch = [
+			{
+				type: "message",
+				id: "in-flight-batch",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "in-flight-call" }],
+				},
+			},
+		];
+		holdReview = true;
+		const inFlight = event("bash", { command: "echo in-flight" });
+		(inFlight as { toolCallId: string }).toolCallId = "in-flight-call";
+		const inFlightResult = Promise.resolve(
+			handlers.get("tool_call")?.(inFlight, ctx),
+		);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.ok(releaseReview, "review should be in flight before bypass");
+
+		await command.handler("bypass", ctx);
+		assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /BYPASSED/);
+		releaseReview();
+		assert.equal(await inFlightResult, undefined);
+		assert.equal(
+			Object.isFrozen(inFlight.input),
+			false,
+			"mid-review bypass should release the pending call without locking it",
+		);
+		holdReview = false;
+		releaseReview = undefined;
+		await command.handler("enable", ctx);
 
 		branch = [
 			{
@@ -1422,7 +1482,7 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		const enabled = event("bash", { command: "echo reviewed" });
 		(enabled as { toolCallId: string }).toolCallId = "enabled-call";
 		assert.equal(await handlers.get("tool_call")?.(enabled, ctx), undefined);
-		assert.equal(reviewCalls, 1);
+		assert.equal(reviewCalls, 2);
 		assert.equal(Object.isFrozen(enabled.input), true);
 		assert.equal(statuses.length, 0);
 
@@ -1447,11 +1507,10 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		const reset = event("bash", { command: "echo reviewed-after-reset" });
 		(reset as { toolCallId: string }).toolCallId = "reset-call";
 		assert.equal(await handlers.get("tool_call")?.(reset, ctx), undefined);
-		assert.equal(reviewCalls, 2);
+		assert.equal(reviewCalls, 3);
 		assert.equal(Object.isFrozen(reset.input), true);
 		assert.equal(statuses.length, 0);
 
-		const waitsBeforeUnsupportedModes = waitForIdleCalls;
 		for (const unsupportedMode of ["rpc", "json", "print"]) {
 			mode = unsupportedMode;
 			await assert.rejects(
@@ -1459,7 +1518,6 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 				/requires interactive TUI mode/,
 			);
 		}
-		assert.equal(waitForIdleCalls, waitsBeforeUnsupportedModes);
 		assert.equal(statuses.length, 0);
 	} finally {
 		ReviewerSessionController.prototype.review = originalReview;
