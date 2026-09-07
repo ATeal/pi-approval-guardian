@@ -1398,6 +1398,25 @@ test("temporarily bypasses reviews with only a persistent below-editor warning",
 		assert.match(notices.join("\n"), /temporarily BYPASSED/);
 		assert.match(notices.join("\n"), /does not grant.*authorization/i);
 
+		// A caller that already renders the bypass state persistently (e.g. a
+		// footer chip) opts out of the multi-line notice; the widget must still
+		// render so the state stays visible without the caller's own indicator.
+		notices.length = 0;
+		const quietEnable = { active: false, quiet: true, handled: false };
+		events.emit(APPROVAL_GUARDIAN_BYPASS_CONTROL_EVENT, quietEnable);
+		assert.equal(quietEnable.handled, true);
+		assert.deepEqual(widgets.at(-1), [
+			"approval-guardian-bypass",
+			undefined,
+			undefined,
+		]);
+		notices.length = 0;
+		const quietBypass = { active: true, quiet: true, handled: false };
+		events.emit(APPROVAL_GUARDIAN_BYPASS_CONTROL_EVENT, quietBypass);
+		assert.equal(quietBypass.handled, true);
+		assert.equal(notices.length, 0, "quiet bypass must not notify");
+		assert.match(widgets.at(-1)?.[1]?.join("\n") ?? "", /BYPASSED/);
+
 		const bypassed = event("bash", { command: "echo bypassed" });
 		(bypassed as { toolCallId: string }).toolCallId = "bypass-call";
 		assert.equal(await handlers.get("tool_call")?.(bypassed, ctx), undefined);

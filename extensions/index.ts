@@ -78,6 +78,14 @@ export const APPROVAL_GUARDIAN_BYPASS_STATE_EVENT =
 export interface ApprovalGuardianBypassControlRequest {
 	active: boolean;
 	handled?: boolean;
+	/**
+	 * Skip the multi-line "temporarily BYPASSED" notice. For callers that
+	 * already render the bypass state persistently themselves (e.g. a footer
+	 * chip), where the warning would repeat what the caller just displayed.
+	 * The below-editor widget still renders, so a caller that goes quiet must
+	 * keep the state visible somewhere.
+	 */
+	quiet?: boolean;
 }
 
 // Extension wiring intentionally coordinates lifecycle, UI, policy, and reviewer state.
@@ -210,6 +218,7 @@ export default function approvalGuardian(
 	const setTemporaryBypass = (
 		nextActive: boolean,
 		ctx: ExtensionContext,
+		options: { quiet?: boolean } = {},
 	): void => {
 		if (nextActive && ctx.mode !== "tui") {
 			throw new Error(
@@ -242,14 +251,16 @@ export default function approvalGuardian(
 			pi.events?.emit(APPROVAL_GUARDIAN_BYPASS_STATE_EVENT, {
 				active: temporaryBypassActive,
 			});
-			ctx.ui.notify(
-				[
-					"Approval Guardian is temporarily BYPASSED.",
-					"Covered agent tool calls will proceed without Guardian review until /approval-guardian enable.",
-					"This does not grant the agent additional authorization, and the bypass resets automatically when the Pi session runtime reloads or is replaced.",
-				].join("\n"),
-				"warning",
-			);
+			if (!options.quiet) {
+				ctx.ui.notify(
+					[
+						"Approval Guardian is temporarily BYPASSED.",
+						"Covered agent tool calls will proceed without Guardian review until /approval-guardian enable.",
+						"This does not grant the agent additional authorization, and the bypass resets automatically when the Pi session runtime reloads or is replaced.",
+					].join("\n"),
+					"warning",
+				);
+			}
 			return;
 		}
 
@@ -268,7 +279,7 @@ export default function approvalGuardian(
 		if (!data || typeof data !== "object" || !runtimeContext) return;
 		const request = data as Partial<ApprovalGuardianBypassControlRequest>;
 		if (typeof request.active !== "boolean") return;
-		setTemporaryBypass(request.active, runtimeContext);
+		setTemporaryBypass(request.active, runtimeContext, { quiet: request.quiet === true });
 		request.handled = true;
 	});
 
