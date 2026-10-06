@@ -215,6 +215,68 @@ test("does not treat ordinary shell source globs as private data", () => {
 	}
 });
 
+test("does not treat regex, sed, and extension-only globs as private data", () => {
+	for (const command of [
+		"rg -o 'import static .*\\.([a-zA-Z]+);' -r '$1' Foo.java",
+		"grep -rn 'fetchUser<.*> load\\|parseConfig(' src/api.ts",
+		"grep -n '^\\s*[0-9]+:\\s*;;' src/core.clj",
+		"sed -E 's/^\\[[^]]*\\] ([^:]*):.*/\\1/' notes.txt",
+		"sed 's|.*/||' files.txt",
+		"sed 's/.*<td>//' page.html",
+		"python3 -c \"import re; print(re.findall(r'<<<<<<< HEAD\\n(.*?)=======', s))\"",
+		"grep -rn todo ~/.config/ --include=*.json --include=*.yaml",
+		"rg -n -g '*.{ts,tsx,json}' handleSubmit .",
+		"rg -n SessionStore --glob '!**/.*' app",
+		"ls ~/.config/example-app/*.json",
+		"cat ~/.local/state/example-app/*.json",
+		"grep -n 'class .*\\(private' src/model.ts",
+		"cat > notes.md <<'EOF'\n**2026** plan * [x] Star box\nEOF",
+		"grep -n -iE 'timer|schedule' dotfiles/.pi-agent/extensions/*.ts",
+		"grep -n '^\\[tools\\.pi\\]' mise.toml",
+		"sed -n '/def self.pi_enabled?/,/^  end/p' lib/app.rb",
+		"ls -d ~/.pi/agent/npm/node_modules/*",
+		"rg -n launcher ~/.pi/agent/skills/example/*.md",
+		"grep -n '^// ---------- state\\|^// ---------- credentials' src/index.ts",
+		"python3 - <<'EOF'\nprint(\"\"\"Rotate the secret.\nSee the credentials doc.\"\"\")\nEOF",
+		"diff -rq --exclude=.git --exclude=.bundle a b",
+		"cat .env.example",
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, false, command);
+	}
+
+	for (const command of [
+		"cat .*",
+		"cat ~/.ssh/.*",
+		"bash -c 'cat ~/.ssh/id_*'",
+		"grep -r token --include=*.pem .",
+		"cat *.env",
+		"cat *.{json,key}",
+		"rg -n 'x' ~/.aws/credentials",
+		"node -e 'const a=require(\"./auth.json\"); console.log(a)'",
+		"sed 's/.*//' ~/.netrc",
+		"ls ~/.pi/agent/skills/../*",
+		"cat ~/.pi/agent/usage-budget*",
+		"cat ~/.pi/agent/sessions/*/x.jsonl",
+		"bash -c 'cat credentials'",
+		"grep -r --exclude=.git token .env",
+		"cat .env.local",
+		"cat .env.production",
+		"type C:\\Users\\test\\.pi\\agent\\*",
+	]) {
+		const action = actionFromToolCall(
+			event("bash", { command }),
+			"/repo/project",
+			{ ...DEFAULT_REVIEW_RULES },
+		);
+		assert.equal(action?.payload.private_data_read, true, command);
+	}
+});
+
 test("does not route installed Pi package docs through private-read review", () => {
 	const packageSkill = actionFromToolCall(
 		event("read", {
