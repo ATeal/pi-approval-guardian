@@ -21,8 +21,10 @@ export function commandReferencesPrivateData(
 	if (referencesDynamicPiPath(expanded)) return true;
 
 	for (const token of shellEvidenceTokens(expanded)) {
-		// `--exclude=.env`, `--exclude-dir=.bundle`: exclusions never read.
-		if (/^--(?:exclude(?:-dir)?|ignore(?:-dir)?)=/i.test(token)) continue;
+		// `--exclude=.env`, `--exclude-dir=.bundle`: a plain exclusion value never
+		// reads. A token carrying whitespace or shell operators (a quoted script
+		// passed to eval/sh -c) is still scanned.
+		if (/^--(?:exclude|ignore)(?:-dir)?=[^\s;&|<>()`$]*$/i.test(token)) continue;
 		for (const candidate of tokenValueCandidates(token)) {
 			if (!candidate) continue;
 			if (pathPatternReferencesPrivateData(candidate)) return true;
@@ -129,25 +131,39 @@ function looksLikeLiteralPath(token: string): boolean {
 }
 
 function pathPatternReferencesPrivateData(expression: string): boolean {
-	// Regex and multi-word arguments (grep/sed patterns, inline scripts, prose)
-	// are still scanned for private names, but regex escapes and quantifier
-	// fragments such as `\s*` or `.*` are not shell globs and must not match
-	// arbitrary credential candidates.
-	const regexLike = looksLikeRegex(expression);
-	const freeText = regexLike || /\s/.test(expression);
-	// Regexes and multi-line text (heredoc bodies, inline scripts) mention
-	// words like "credentials" or "secret" as prose; there only path-shaped
-	// tokens count. Single-line multi-word shell strings keep bare names.
-	const proseLike = regexLike || /\n/.test(expression);
-	const source = regexLike ? stripRegexEscapes(expression) : expression;
+	// Prose context: multi-line text (quoted multi-line strings) or a single
+	// regex argument. There, words such as "credentials" are prose and
+	// one-character glob fragments are noise. A regex-looking string that also
+	// looks like a script (inner quotes, `;`, `&&`, `$(`, backticks) is never
+	// prose, so `bash -c "grep '\s' credentials"` keeps its bare names.
+	const scriptLike = /['"`;]|&&|\$\(/.test(expression);
+	const prose =
+		!scriptLike && (/\n/.test(expression) || looksLikeRegex(expression));
+	const words = [...new Set([expression, ...expression.split(/\s+/)])];
+	return words.some((word) => wordReferencesPrivateData(word, prose));
+}
+
+function wordReferencesPrivateData(word: string, prose: boolean): boolean {
+	// Path-shaped words always get the full check: `~/.*/*\s` is a glob that
+	// bash reads as `~/.*/*s`, not a regex.
+	const pathShaped = startsLikePath(word);
+	const regexLike = !pathShaped && looksLikeRegex(word);
+	const proseWord = prose && !pathShaped;
+	const source = regexLike ? stripRegexEscapes(word) : word;
 	const tokens = [source, ...source.split(/[\s'"`;|&<>()]+/)]
 		.map((token) => token.slice(token.lastIndexOf("=") + 1))
 		.map(cleanShellToken)
 		.filter(Boolean);
 	return tokens.some((token) => {
 		// Negated selectors (`rg -g '!**/.*'`) exclude paths; they never read them.
-		if (token.startsWith("!")) return false;
-		if (proseLike && !/[./\\*?[\]{}]/.test(token)) return false;
+		if (
+			token.startsWith("!") &&
+			!/[\s;&|<>()`$]/.test(token) &&
+			!token.includes("..")
+		) {
+			return false;
+		}
+		if (proseWord && !/[./\\*?[\]{}]/.test(token)) return false;
 		const segments = token
 			.replace(/\\/g, "/")
 			.toLowerCase()
@@ -155,7 +171,7 @@ function pathPatternReferencesPrivateData(expression: string): boolean {
 			.filter(Boolean);
 		for (let index = 0; index < segments.length; index++) {
 			const pattern = segments[index] ?? "";
-			if (freeText && isQuantifierFragment(pattern, regexLike)) continue;
+			if (isNoiseFragment(pattern, regexLike, proseWord)) continue;
 			const extensionGlob = extensionOnlyGlobIsPrivate(pattern);
 			if (extensionGlob !== undefined) {
 				if (extensionGlob) return true;
@@ -182,11 +198,19 @@ function pathPatternReferencesPrivateData(expression: string): boolean {
 	});
 }
 
-const REGEX_ESCAPE = /\\[sSdDwWbBntr.|()[\]{}+*?^$\/<>0-9]/;
+function startsLikePath(word: string): boolean {
+	return /^(?:\/|~|\.\.?\/|[a-z]:[\\/]|\\\\)/i.test(word);
+}
+
+// Escapes that mark a regex. Shell/printf escapes (`\n`, `\t`, `\r`, `\1`)
+// are deliberately absent so ordinary inline scripts are not treated as regex.
+const REGEX_TRIGGER_ESCAPE = /\\[sSdDwWbB.|()[\]{}+*?^$\/<>]/;
+// Escapes removed from a regex before glob matching.
+const REGEX_STRIP_ESCAPE = /\\[sSdDwWbBntr.|()[\]{}+*?^$\/<>0-9]/g;
 
 function looksLikeRegex(expression: string): boolean {
 	return (
-		REGEX_ESCAPE.test(expression) ||
+		REGEX_TRIGGER_ESCAPE.test(expression) ||
 		/^\^/.test(expression) ||
 		/\(\?/.test(expression) ||
 		/\[\^/.test(expression) ||
@@ -197,7 +221,7 @@ function looksLikeRegex(expression: string): boolean {
 }
 
 function stripRegexEscapes(expression: string): string {
-	return expression.replace(new RegExp(REGEX_ESCAPE.source, "g"), " ");
+	return expression.replace(REGEX_STRIP_ESCAPE, " ");
 }
 
 function globLiteral(pattern: string): string {
@@ -205,21 +229,25 @@ function globLiteral(pattern: string): string {
 }
 
 /**
- * Inside regex or free-text arguments, `.*`/`.*?` are quantifiers and
- * single-character fragments like `*a` or `1***` are prose/markdown noise.
- * A bare shell word such as `cat .*` is never free text and stays private.
+ * Inside a regex word, `.*`/`.*?` are quantifiers. Inside prose (multi-line
+ * text or a regex argument), one-character glob fragments such as `*a` or
+ * `1***` are markdown/prose noise. Bare shell words such as `cat .*` or
+ * `cat c*`, and single-line scripts such as `bash -c 'cat c*'`, stay private.
  */
-function isQuantifierFragment(pattern: string, regexLike: boolean): boolean {
+function isNoiseFragment(
+	pattern: string,
+	regexLike: boolean,
+	prose: boolean,
+): boolean {
 	if (!/[*?]/.test(pattern)) return false;
-	const literal = globLiteral(pattern);
 	if (/^\.[*?+]*$/.test(pattern)) return regexLike;
-	return literal.length <= 1;
+	return prose && globLiteral(pattern).length <= 1;
 }
 
 /**
  * Extension-only globs (`*.json`, `--include=*.yaml`, `*.{ts,json}`) describe
  * a file type, not a credential name. They are private only when the
- * extension itself is a private-key/secret format such as `*.pem`.
+ * extension itself is a private format such as `*.pem` or `*.env`.
  * Returns undefined when the pattern is not an extension-only glob.
  */
 function extensionOnlyGlobIsPrivate(pattern: string): boolean | undefined {
@@ -233,10 +261,7 @@ function extensionOnlyGlobIsPrivate(pattern: string): boolean | undefined {
 	if (extensions.length === 0) return undefined;
 	return extensions.some(
 		(extension) =>
-			isPrivateReadBasename(`file.${extension}`) ||
-			extension === "env" ||
-			extension === "secret" ||
-			extension === "secrets",
+			isPrivateReadBasename(`file.${extension}`) || extension === "env",
 	);
 }
 
@@ -287,30 +312,62 @@ function expandBracePatterns(pattern: string, depth = 0): string[] {
 }
 
 // `.pi` as a real directory segment, not `.pi-agent/`, `tools.pi` or `self.pi_x`.
-const PI_DIRECTORY_SEGMENT = /(?:^|[/\\$}~*?])\.pi(?=[/\\*?{}[\]$"']|$)/i;
+const PI_SEGMENT = /(?<![\w.-])\.pi(?![\w-])/i;
 
 // Source and installed-package subtrees that docs/REFERENCE.md documents as
 // not private solely because they live under `.pi/`.
 const PI_PUBLIC_SUBTREE =
-	/(?:^|[/\\])\.pi[/\\](?:agent[/\\])?(?:skills|extensions|prompts|themes|agents|git|npm[/\\]node_modules|context-mode[/\\]insight-cache[/\\]node_modules)[/\\]/i;
+	/^\/(?:agent\/)?(?:skills|extensions|prompts|themes|agents|git|npm\/node_modules|context-mode\/insight-cache\/node_modules)\//i;
+
+const SHELL_GLOB = /[*?[\]{}]/;
+
+function isWindowsStyle(token: string): boolean {
+	return /^[a-z]:[\\/]/i.test(token) || /^\\\\/.test(token);
+}
+
+/**
+ * Normalizes one brace expansion the way the shell would see the path:
+ * Windows-style tokens use `\` as a separator; elsewhere `\x` is a shell
+ * escape for `x` (so `\.pi` is `.pi` and `'^\[tools\.pi\]'` is not a path).
+ */
+function normalizePiCandidate(token: string): string {
+	return isWindowsStyle(token)
+		? token.replace(/\\/g, "/")
+		: token.replace(/\\(.)/g, "$1");
+}
+
+/**
+ * True when a glob/variable path under `.pi` may reach private Pi data.
+ * Every brace expansion is checked. Only the first `.pi` segment counts, the
+ * public-subtree exemption needs a literal prefix, and the remainder may not
+ * climb out through `..` or globs that can match it (`.?`, `.[.]`, `[.][.]`
+ * in older bash or with dotglob).
+ */
+function piCandidateIsPrivate(candidate: string): boolean {
+	const path = normalizePiCandidate(candidate);
+	const match = PI_SEGMENT.exec(path);
+	if (!match || match.index === undefined) return false;
+	if (!SHELL_GLOB.test(path) && !path.includes("$")) return false;
+	if (path.includes("$")) return true;
+	const prefix = path.slice(0, match.index);
+	const rest = path.slice(match.index + match[0].length);
+	const subtree = PI_PUBLIC_SUBTREE.exec(rest);
+	if (!subtree || SHELL_GLOB.test(prefix)) return true;
+	const tail = rest.slice(subtree[0].length).split("/");
+	return tail.some(
+		(segment) =>
+			segment === ".." ||
+			/[{}]/.test(segment) ||
+			(SHELL_GLOB.test(segment) &&
+				(segment.startsWith(".") || segment.startsWith("["))),
+	);
+}
 
 function referencesDynamicPiPath(command: string): boolean {
-	const piTokens = command
-		.split(/[\s'"`;|&<>()]+/)
-		.filter(
-			(token) =>
-				PI_DIRECTORY_SEGMENT.test(token) &&
-				!/^\^|\\[[(|]|\(\?/.test(token),
-		);
+	const tokens = command.split(/[\s'"`;|&<>()]+/).filter(Boolean);
 	if (
-		piTokens.some(
-			(token) =>
-				/[*?\[\]{}$]/.test(token) &&
-				!(
-					PI_PUBLIC_SUBTREE.test(token) &&
-					!token.includes("$") &&
-					!token.includes("..")
-				),
+		tokens.some((token) =>
+			expandBracePatterns(token).some(piCandidateIsPrivate),
 		)
 	) {
 		return true;
@@ -322,7 +379,14 @@ function referencesDynamicPiPath(command: string): boolean {
 	for (const assignment of assignments) {
 		const variable = assignment[1];
 		if (!variable) continue;
-		if (!PI_DIRECTORY_SEGMENT.test(assignment[2] ?? "")) continue;
+		const value = assignment[2] ?? "";
+		if (
+			!expandBracePatterns(value).some((expanded) =>
+				PI_SEGMENT.test(normalizePiCandidate(expanded)),
+			)
+		) {
+			continue;
+		}
 		const remaining = command.slice(
 			(assignment.index ?? 0) + assignment[0].length,
 		);
