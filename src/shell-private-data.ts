@@ -25,8 +25,9 @@ export function commandReferencesPrivateData(
 	// A quoted string handed to a shell is a script, so it never gets the
 	// prose relaxations: `bash -c "grep \s credentials"`, `bash <<< '...'`,
 	// `printf '...' | sh`, `subprocess.run("""...""", shell=True)`.
+	// Match the word the shell runs (`ba\sh` is `bash`), not the raw spelling.
 	const allowProse =
-		!words.some((word) => isShellInvoker(word.text)) &&
+		!words.some((word) => isShellInvoker(word.value)) &&
 		!SCRIPT_RUNNER.test(expanded);
 	const shellValues = words.map(({ text, value }) =>
 		isWindowsStyle(text) ? text : value,
