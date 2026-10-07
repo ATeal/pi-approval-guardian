@@ -26,8 +26,9 @@ export function commandReferencesPrivateData(
 	// prose relaxations: `bash -c "grep \s credentials"`, `bash <<< '...'`,
 	// `printf '...' | sh`, `subprocess.run("""...""", shell=True)`.
 	// Match the word the shell runs (`ba\sh` is `bash`), not the raw spelling.
+	// A simple assignment counts: `S=sh; $S -c '...'` and `S=/bin/sh; ${S}`.
 	const allowProse =
-		!words.some((word) => isShellInvoker(word.value)) &&
+		!commandInvokesShell(words) &&
 		!SCRIPT_RUNNER.test(expanded);
 	const shellValues = words.map(({ text, value }) =>
 		isWindowsStyle(text) ? text : value,
@@ -147,6 +148,27 @@ const SHELL_INVOKER =
 
 function isShellInvoker(token: string): boolean {
 	return SHELL_INVOKER.test(token.slice(token.lastIndexOf("/") + 1));
+}
+
+const SHELL_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+const SHELL_VARIABLE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$|^\$([A-Za-z_][A-Za-z0-9_]*)$/;
+
+function commandInvokesShell(words: ShellWord[]): boolean {
+	if (words.some((word) => isShellInvoker(word.value))) return true;
+	const shells = new Map<string, number>();
+	for (let index = 0; index < words.length; index++) {
+		const assigned = SHELL_ASSIGNMENT.exec(words[index]?.value ?? "");
+		if (!assigned?.[1]) continue;
+		if (isShellInvoker(assigned[2] ?? "")) shells.set(assigned[1], index);
+		else shells.delete(assigned[1]);
+	}
+	return words.some((word, index) => {
+		const match = SHELL_VARIABLE.exec(word.value);
+		const name = match?.[1] ?? match?.[2];
+		if (!name) return false;
+		const assignedAt = shells.get(name);
+		return assignedAt !== undefined && assignedAt < index;
+	});
 }
 
 /**
